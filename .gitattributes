@@ -1,0 +1,11 @@
+# Normalise line endings. Without this, a Windows checkout rewrites .go files
+# with CRLF, which makes `gofmt -l` report every file as unformatted and breaks
+# CI on Linux.
+* text=auto eol=lf
+
+# Binary assets must never be munged.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.heic binary
