@@ -1,0 +1,9 @@
+.git
+.env
+web/node_modules
+web/dist
+bin
+sample-photos
+data
+thumbnails
+*.md

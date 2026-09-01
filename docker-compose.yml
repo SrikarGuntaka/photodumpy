@@ -1,0 +1,101 @@
+name: photo-organizer
+
+# Shared application environment. Anchors keep the api and worker services
+# genuinely identical in configuration -- drift between them would produce bugs
+# that only appear under `--scale`.
+x-app-env: &app-env
+  DATABASE_URL: postgres://${POSTGRES_USER:-photo}:${POSTGRES_PASSWORD:-photo}@postgres:5432/${POSTGRES_DB:-photoorganizer}?sslmode=disable
+  ENV: ${ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  PHOTO_ROOT: /photos
+  THUMBNAIL_DIR: /var/lib/photo-organizer/thumbnails
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-photo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-photo}
+      POSTGRES_DB: ${POSTGRES_DB:-photoorganizer}
+      # Postgres refuses to initialise a data directory that is not empty; this
+      # subdirectory keeps the volume mount point separate from PGDATA, which
+      # avoids the classic "lost+found" failure on some volume drivers.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      # Exposed so you can psql from the host while testing.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `depends_on: service_healthy` uses this. Without it, the API starts
+      # before Postgres accepts connections -- survivable thanks to the retry
+      # loop in internal/database, but noisy.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-photo} -d ${POSTGRES_DB:-photoorganizer} -q"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  api:
+    build:
+      context: .
+      target: runtime
+      args:
+        VERSION: ${VERSION:-dev}
+    image: photo-organizer:local
+    restart: unless-stopped
+    command: ["/app/api"]
+    environment:
+      <<: *app-env
+      HTTP_ADDR: ":8080"
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      # READ-ONLY. This is the enforcement point for "never modify, move or
+      # delete original photos": even a bug cannot write here.
+      - ${HOST_PHOTOS_DIR:-./sample-photos}:/photos:ro
+      - thumbnails:/var/lib/photo-organizer/thumbnails
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/photo-organizer", "-api", "http://localhost:8080", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    # Phase 1: this process connects and idles. The job queue lands in Phase 5,
+    # at which point `docker compose up --scale worker=4` becomes meaningful.
+    # It is here now so the image, wiring and shutdown path are exercised early.
+    build:
+      context: .
+      target: runtime
+      args:
+        VERSION: ${VERSION:-dev}
+    image: photo-organizer:local
+    restart: unless-stopped
+    command: ["/app/worker"]
+    environment:
+      <<: *app-env
+    volumes:
+      - ${HOST_PHOTOS_DIR:-./sample-photos}:/photos:ro
+      - thumbnails:/var/lib/photo-organizer/thumbnails
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Workers wait for the API because the API owns migrations. Without this,
+      # a worker could start against a schema that does not exist yet.
+      api:
+        condition: service_healthy
+    # SIGTERM, not SIGKILL, and enough grace to drain in-flight jobs. Phase 5
+    # depends on this: `docker compose stop worker` must be a clean shutdown,
+    # while `docker compose kill worker` is the crash we test recovery against.
+    stop_signal: SIGTERM
+    stop_grace_period: 35s
+
+volumes:
+  pgdata:
+  thumbnails:

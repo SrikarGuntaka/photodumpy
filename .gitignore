@@ -1,0 +1,24 @@
+# Env / secrets
+.env
+.env.local
+
+# Build output
+/bin/
+*.exe
+
+# Go
+vendor/
+
+# Node
+node_modules/
+web/dist/
+
+# Local data
+/sample-photos/
+/data/
+/thumbnails/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
