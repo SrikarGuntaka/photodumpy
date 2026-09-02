@@ -160,6 +160,9 @@ To use your own photos instead, set `HOST_PHOTOS_DIR` in `.env`.
 
 ## Testing
 
+**[TESTING.md](TESTING.md) is a step-by-step walkthrough** covering everything
+built so far, with expected output for each step and what it proves.
+
 ### Unit tests — no database needed
 
 ```bash
