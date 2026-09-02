@@ -72,4 +72,13 @@ test:
 fixtures:
 	$(GO_RUN) go run ./cmd/genfixtures -root ./sample-photos -clean
 
-.PHONY: help up up-fg down reset logs ps status psql tidy build vet fmt test fixtures
+## test-integration: run tests that need a real Postgres (starts one if needed)
+test-integration:
+	$(COMPOSE) up -d postgres
+	$(GO_RUN) sh -c 'TEST_DATABASE_URL=postgres://$${POSTGRES_USER:-photo}:$${POSTGRES_PASSWORD:-photo}@host.docker.internal:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB:-photoorganizer}?sslmode=disable go test -tags integration -count=1 ./...'
+
+## scan: register and scan the sample corpus through the running API
+scan:
+	$(COMPOSE) exec api /usr/local/bin/photo-organizer scan /photos -wait
+
+.PHONY: help up up-fg down reset logs ps status psql tidy build vet fmt test fixtures test-integration scan

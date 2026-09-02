@@ -51,6 +51,66 @@ The scan is *not* a job. Splitting a directory walk into jobs would require
 knowing the tree before walking it. Instead the API streams the walk, inserting
 rows and fanning out per-photo jobs as it goes.
 
+### How a scan actually runs (implemented)
+
+```
+POST /api/libraries          -> resolve path, verify inside PHOTO_ROOT, upsert row
+POST /api/libraries/{id}/scan
+      |
+      |-- re-validate the stored root (PHOTO_ROOT may have changed since)
+      |-- MarkScanStarted: UPDATE ... WHERE (no scan running)   <- the guard
+      |     0 rows -> 409, a scan is already running
+      |-- spawn goroutine, return 202 immediately
+      |
+      +-> photos.Walk streams entries
+            accumulate 500 -> INSERT ... SELECT unnest(...) ON CONFLICT DO NOTHING
+            repeat until the walk ends
+          MarkScanFinished (always, even on cancellation)
+```
+
+Three properties this shape buys:
+
+- **Bounded memory.** The walk streams and flushes every 500 entries, so peak
+  memory is the same for a 100-photo library and a 100,000-photo one.
+- **Bounded round trips.** Batched inserts make a 10,000-photo scan ~20 round
+  trips instead of 10,000. Arrays are passed as parameters and unnested
+  server-side, not interpolated into SQL.
+- **Idempotency comes from the database.** The unique index on
+  `(library_id, relative_path)` is the authority on "have we seen this file".
+  `ON CONFLICT DO NOTHING` means a rescan inserts nothing, and `RowsAffected`
+  proves it rather than the code asserting it.
+
+Scanning is asynchronous because a large library takes longer than a sensible
+HTTP timeout. Progress is polled from `GET /api/libraries/{id}`, which reads the
+same counts the scan is writing — there is no separate progress channel that
+could disagree with the database.
+
+**Crash recovery for scans.** A process that dies mid-scan leaves its library
+marked `scanning` forever, which would make every future scan return 409. The
+API reconciles this at startup: a fresh process owns no scans by definition, so
+any library still marked running was interrupted. `?force=true` is the manual
+override for the same situation.
+
+### Path containment
+
+Every path from a client passes `photos.ResolveWithin` before anything touches
+the filesystem. Both the root and the target are made absolute and
+symlink-resolved *before* comparison, and containment is tested with
+`filepath.Rel` rather than a string prefix.
+
+Each of those details is load-bearing:
+
+| Attack | Defeated by |
+|--------|-------------|
+| `../../etc/passwd` | resolution + `Rel` segment check |
+| absolute path elsewhere | same |
+| `/photos-evil` vs `/photos` | `Rel` instead of `HasPrefix` |
+| symlink inside root -> outside | `EvalSymlinks` **before** comparing |
+| Windows vs POSIX separators | `filepath` throughout, stored as forward slashes |
+
+The error returned never echoes the resolved path, because on a traversal
+attempt that would confirm what exists outside the root.
+
 Paths are stored **relative** to `libraries.root_path` and normalised to forward
 slashes. Moving or remounting the library is then a one-row update rather than a
 table rewrite, and Windows/Linux path differences stop at the ingestion

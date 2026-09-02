@@ -19,8 +19,8 @@ Built in phases, each independently runnable and testable.
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | Skeleton: Postgres, migrations, config, Docker Compose, health endpoints, CLI | **Done** |
-| 2 | Local folder ingestion (`scan`) | Next |
-| 3 | Metadata extraction (EXIF, GPS, dimensions) | Planned |
+| 2 | Local folder ingestion (`scan`) | **Done** |
+| 3 | Metadata extraction (EXIF, GPS, dimensions) | Next |
 | 4 | Exact duplicate detection (SHA-256) | Planned |
 | 5 | Distributed job queue: leases, retries, crash recovery | Planned |
 | 6 | Near-duplicate detection (perceptual hashing) | Planned |
@@ -73,12 +73,48 @@ Process  OK (up 12s)
 Database UP (2ms)
 ```
 
-The API is on <http://localhost:8080>. Two endpoints exist in Phase 1:
+The API is on <http://localhost:8080>:
 
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /healthz` | Liveness. Does not touch the database. |
 | `GET /readyz` | Readiness. Returns 503 if Postgres is unreachable. |
+| `POST /api/libraries` | Register a folder. Idempotent: same path returns the existing library. |
+| `GET /api/libraries` | List libraries. |
+| `GET /api/libraries/{id}` | One library, with photo counts by state. |
+| `POST /api/libraries/{id}/scan` | Start a scan. Returns 202; poll the library for progress. |
+| `GET /api/libraries/{id}/photos` | Paginated photo list. |
+
+## Scanning a folder
+
+```bash
+docker compose exec api photo-organizer scan /photos -wait
+```
+
+That registers the folder as a library (if it is not already one) and scans it:
+
+```
+Created library 6f2c1e08-...
+Root  /photos
+
+Scan started.
+  46 photos discovered. Scan complete.
+```
+
+Then inspect what it found:
+
+```bash
+docker compose exec api photo-organizer libraries
+docker compose exec api photo-organizer photos <library-id>
+```
+
+**Scanning is idempotent.** Running the same scan twice discovers the same
+files and inserts none of them the second time — the API reports `discovered`
+and `inserted` separately so that is visible rather than merely claimed.
+
+**Paths are validated.** The API refuses any path outside the configured
+`PHOTO_ROOT`, including via `..` traversal or a symlink pointing out of the
+tree. In Docker that root is the read-only `/photos` mount.
 
 ## Common tasks
 
@@ -122,28 +158,44 @@ verify correctness.
 
 To use your own photos instead, set `HOST_PHOTOS_DIR` in `.env`.
 
-## Testing Phase 1
+## Testing
+
+### Unit tests — no database needed
 
 ```bash
 go test ./...
 ```
 
-Covers configuration parsing and validation, and the migration loader
-(ordering, checksum drift detection, malformed filenames). Neither requires a
-database.
+Covers config parsing and validation, the migration loader (ordering, checksum
+drift, malformed filenames), the fixture generator's ground truth, and — most
+importantly — **path containment**: `..` traversal, absolute paths outside the
+root, prefix confusion (`/photos-evil` vs `/photos`), and symlinks inside the
+root pointing out of it.
 
-To verify the stack end to end:
+Two symlink tests skip on Windows, where creating a symlink needs elevation.
+They run on Linux via `make test`.
+
+### Integration tests — real Postgres
+
+The scan's guarantees *are* database behaviour (ON CONFLICT idempotency, the
+claim-by-update scan guard, batch insert counts), so mocking the store would
+just test the mock.
+
+```bash
+make test-integration
+```
+
+### End to end
 
 ```bash
 docker compose up -d --build
-docker compose exec api photo-organizer status          # -> Process OK, Database UP
+docker compose exec api photo-organizer status
 docker compose exec postgres psql -U photo -d photoorganizer -c '\dt'
 ```
 
 You should see `libraries`, `photos` and `schema_migrations`.
 
-To verify the API survives a database restart (it should, without being
-restarted itself):
+The API survives a database restart without being restarted itself:
 
 ```bash
 docker compose restart postgres

@@ -14,6 +14,8 @@ import (
 	"github.com/srikarguntaka/photo-organizer/internal/api"
 	"github.com/srikarguntaka/photo-organizer/internal/config"
 	"github.com/srikarguntaka/photo-organizer/internal/database"
+	"github.com/srikarguntaka/photo-organizer/internal/ingest"
+	"github.com/srikarguntaka/photo-organizer/internal/store"
 	"github.com/srikarguntaka/photo-organizer/migrations"
 )
 
@@ -52,9 +54,24 @@ func run() error {
 		return err
 	}
 
+	st := store.New(pool)
+
+	// A scan interrupted by a crash leaves its library marked "scanning"
+	// forever, which would make MarkScanStarted refuse every future scan.
+	// Reconciling at startup is the only place that can distinguish "the
+	// process died" from "a scan is genuinely running", because a fresh
+	// process by definition owns no scans.
+	if n, err := st.ReconcileInterruptedScans(ctx); err != nil {
+		return err
+	} else if n > 0 {
+		log.Warn("reconciled scans interrupted by a previous shutdown", "libraries", n)
+	}
+
+	scanner := ingest.NewScanner(st, log)
+
 	srv := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: api.NewServer(cfg, pool, log).Handler(),
+		Handler: api.NewServer(cfg, pool, st, scanner, log).Handler(),
 		// Without these, a slow or malicious client can hold a connection open
 		// indefinitely. ReadHeaderTimeout in particular is the guard against
 		// Slowloris.
@@ -91,6 +108,14 @@ func run() error {
 		log.Error("graceful shutdown timed out, forcing close", "error", err)
 		_ = srv.Close()
 		return fmt.Errorf("shutdown: %w", err)
+	}
+
+	// Stop in-flight scans after the HTTP server has drained, so no new scan
+	// can start while we are winding down. Cancelled scans lose no work: rows
+	// already inserted stay, and the next scan resumes because inserts are
+	// idempotent.
+	if err := scanner.Shutdown(shutdownCtx); err != nil {
+		log.Warn("scans did not stop cleanly", "error", err)
 	}
 
 	log.Info("stopped cleanly")
