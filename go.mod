@@ -2,7 +2,10 @@ module github.com/srikarguntaka/photo-organizer
 
 go 1.23
 
-require github.com/jackc/pgx/v5 v5.7.2
+require (
+	github.com/jackc/pgx/v5 v5.7.2
+	github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

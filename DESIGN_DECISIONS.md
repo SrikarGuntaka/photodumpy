@@ -221,6 +221,24 @@ chronology they would corrupt.
 in Tokyo and one at 10am in Austin are indistinguishable in ordering. This is not
 solved, it is documented — `captured_at_source` records what we actually know.
 
+**Decision forced by that limitation: EXIF wall-clock is interpreted as UTC.**
+This surfaced concretely while building the fixture corpus. `goexif` parses
+`DateTimeOriginal` and, finding no zone, attaches `time.Local` — so identical
+bytes decode to `09:47 -0500` on a developer machine in US/Central and
+`09:47 +0000` in a UTC CI container. Storing the parser's guess would mean the
+same photo scanned on two machines gets two different `captured_at` values, and
+clustering would silently disagree with itself depending on where it ran.
+
+So the extractor must discard the guessed zone and interpret the wall clock as
+UTC, uniformly. This is *wrong* in the sense that it does not recover the real
+local time — but it is consistent, machine-independent, and preserves ordering
+within a library, which is what clustering actually needs. `captured_at_source`
+records that the value came from EXIF so the imprecision stays visible rather
+than being laundered into apparent certainty.
+
+The fixture test asserts on wall-clock fields rather than instants for exactly
+this reason, with the rationale written at the assertion.
+
 ---
 
 ## 10. Migrations run in the API, guarded by an advisory lock

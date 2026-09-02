@@ -68,4 +68,8 @@ fmt:
 test:
 	$(GO_RUN) go test ./...
 
-.PHONY: help up up-fg down reset logs ps status psql tidy build vet fmt test
+## fixtures: regenerate the synthetic test corpus in ./sample-photos
+fixtures:
+	$(GO_RUN) go run ./cmd/genfixtures -root ./sample-photos -clean
+
+.PHONY: help up up-fg down reset logs ps status psql tidy build vet fmt test fixtures

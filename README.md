@@ -95,6 +95,33 @@ make reset     # stop and DELETE the database volume
 `make` targets work with only Docker installed; a local Go toolchain just makes
 them faster.
 
+## Test photos
+
+The repo ships a generator that writes a synthetic photo corpus with **known
+ground truth**, so tests can assert exact numbers:
+
+```bash
+go run ./cmd/genfixtures -root ./sample-photos -clean
+```
+
+It produces 46 files including exact duplicates (byte-identical, across
+different directories), near-duplicates (recompressed and resized — different
+bytes, same image), deliberately blurred and over/under-exposed frames, JPEGs
+with full EXIF+GPS, with EXIF but no GPS, and with no EXIF at all, plus
+unsupported extensions and three kinds of corrupt file. Ground truth is written
+to `sample-photos/MANIFEST.json`.
+
+Generation is deterministic: the same `-seed` always produces byte-identical
+output, and different seeds produce different corpora.
+
+Why synthetic first: pointed at a real folder, "found 12 duplicate groups" is
+unfalsifiable, because nobody knows how many that folder actually contains. The
+generator decides, so a test can assert. Real photo libraries are the better
+*validation* input — and the Phase 11 benchmarks use one — but they cannot
+verify correctness.
+
+To use your own photos instead, set `HOST_PHOTOS_DIR` in `.env`.
+
 ## Testing Phase 1
 
 ```bash
