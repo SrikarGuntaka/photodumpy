@@ -31,6 +31,7 @@ Commands:
   status                 Show API and database health
   libraries              List registered libraries
   scan <path>            Register a folder (if new) and scan it for photos
+  process <library-id>   Extract metadata (EXIF, GPS, dimensions) for a library
   photos <library-id>    List photos in a library
   version                Print the client version
 
@@ -39,7 +40,7 @@ Flags:
   -timeout dur      Request timeout (default 30s)
   -name string      Library name for 'scan' (default: the folder's name)
   -force            For 'scan': override a library stuck in the scanning state
-  -wait             For 'scan': poll until the scan finishes
+  -wait             For 'scan'/'process': poll until the work finishes
   -limit int        For 'photos': page size (default 20)
   -offset int       For 'photos': page offset
 
@@ -109,6 +110,11 @@ func run(args []string, out io.Writer) error {
 			return errors.New("scan requires a path: photo-organizer scan <path>")
 		}
 		return cmdScan(ctx, c, out, rest[0], *name, *force, *wait)
+	case "process":
+		if len(rest) < 1 {
+			return errors.New("process requires a library id: photo-organizer process <library-id>")
+		}
+		return cmdProcess(ctx, c, out, rest[0], *wait)
 	case "photos":
 		if len(rest) < 1 {
 			return errors.New("photos requires a library id: photo-organizer photos <library-id>")
@@ -255,19 +261,38 @@ type librariesResponse struct {
 	Libraries []library `json:"libraries"`
 }
 
+type metadataSummary struct {
+	Total        int `json:"total"`
+	Extracted    int `json:"extracted"`
+	Pending      int `json:"pending"`
+	WithEXIFDate int `json:"with_exif_date"`
+	WithFileDate int `json:"with_file_date"`
+	WithNoDate   int `json:"with_no_date"`
+	WithGPS      int `json:"with_gps"`
+	Failed       int `json:"failed"`
+}
+
 type libraryDetailResponse struct {
-	Library       library        `json:"library"`
-	PhotosByState map[string]int `json:"photos_by_state"`
-	ScanningHere  bool           `json:"scanning_here"`
+	Library        library         `json:"library"`
+	PhotosByState  map[string]int  `json:"photos_by_state"`
+	Metadata       metadataSummary `json:"metadata"`
+	ScanningHere   bool            `json:"scanning_here"`
+	ExtractingHere bool            `json:"extracting_here"`
 }
 
 type photo struct {
-	ID               string  `json:"id"`
-	RelativePath     string  `json:"relative_path"`
-	OriginalFilename string  `json:"original_filename"`
-	FileSizeBytes    int64   `json:"file_size_bytes"`
-	DetectedFormat   *string `json:"detected_format"`
-	State            string  `json:"state"`
+	ID               string     `json:"id"`
+	RelativePath     string     `json:"relative_path"`
+	OriginalFilename string     `json:"original_filename"`
+	FileSizeBytes    int64      `json:"file_size_bytes"`
+	DetectedFormat   *string    `json:"detected_format"`
+	State            string     `json:"state"`
+	Width            *int       `json:"width"`
+	Height           *int       `json:"height"`
+	CapturedAt       *time.Time `json:"captured_at"`
+	CapturedAtSource *string    `json:"captured_at_source"`
+	Latitude         *float64   `json:"latitude"`
+	Longitude        *float64   `json:"longitude"`
 }
 
 type photosResponse struct {
@@ -401,6 +426,63 @@ func pollScan(ctx context.Context, c *client, out io.Writer, libraryID string) e
 	}
 }
 
+// cmdProcess starts metadata extraction and optionally waits for it.
+func cmdProcess(ctx context.Context, c *client, out io.Writer, libraryID string, wait bool) error {
+	if _, err := c.do(ctx, http.MethodPost, "/api/libraries/"+libraryID+"/metadata", nil, nil); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "Metadata extraction started.")
+
+	if !wait {
+		fmt.Fprintf(out, "\nPoll progress with:  photo-organizer photos %s\n", libraryID)
+		return nil
+	}
+	return pollProcess(ctx, c, out, libraryID)
+}
+
+// pollProcess reports extraction progress from the database-backed counts,
+// which stay correct even if the work is running in another process.
+func pollProcess(ctx context.Context, c *client, out io.Writer, libraryID string) error {
+	const interval = 400 * time.Millisecond
+	last := -1
+
+	for {
+		var detail libraryDetailResponse
+		if _, err := c.get(ctx, "/api/libraries/"+libraryID, &detail); err != nil {
+			return err
+		}
+
+		m := detail.Metadata
+		if m.Extracted != last {
+			fmt.Fprintf(out, "\r  %d / %d extracted...", m.Extracted, m.Total)
+			last = m.Extracted
+		}
+
+		if m.Pending == 0 && !detail.ExtractingHere {
+			fmt.Fprintf(out, "\r  %d / %d extracted. Done.\n\n", m.Extracted, m.Total)
+			printMetadataSummary(out, m)
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			fmt.Fprintln(out)
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+func printMetadataSummary(out io.Writer, m metadataSummary) {
+	fmt.Fprintf(out, "  EXIF timestamp        %d\n", m.WithEXIFDate)
+	fmt.Fprintf(out, "  filesystem timestamp  %d\n", m.WithFileDate)
+	fmt.Fprintf(out, "  no timestamp          %d\n", m.WithNoDate)
+	fmt.Fprintf(out, "  GPS coordinates       %d\n", m.WithGPS)
+	if m.Failed > 0 {
+		fmt.Fprintf(out, "  failed to decode      %d\n", m.Failed)
+	}
+}
+
 func cmdPhotos(ctx context.Context, c *client, out io.Writer, libraryID string, limit, offset int) error {
 	var detail libraryDetailResponse
 	if _, err := c.get(ctx, "/api/libraries/"+libraryID, &detail); err != nil {
@@ -440,15 +522,44 @@ func cmdPhotos(ctx context.Context, c *client, out io.Writer, libraryID string, 
 		return nil
 	}
 
-	fmt.Fprintf(out, "%-10s  %-8s  %-12s  %s\n", "SIZE", "FORMAT", "STATE", "PATH")
+	fmt.Fprintf(out, "%-10s  %-5s  %-9s  %-18s  %-14s  %s\n",
+		"SIZE", "FMT", "DIMS", "CAPTURED", "GPS", "PATH")
 	for _, p := range resp.Photos {
 		format := "-"
 		if p.DetectedFormat != nil {
 			format = *p.DetectedFormat
 		}
-		fmt.Fprintf(out, "%-10s  %-8s  %-12s  %s\n",
-			humanBytes(p.FileSizeBytes), format, p.State, p.RelativePath)
+
+		dims := "-"
+		if p.Width != nil && p.Height != nil {
+			dims = fmt.Sprintf("%dx%d", *p.Width, *p.Height)
+		}
+
+		// The timestamp carries its provenance, so a date that came from file
+		// mtime is never mistaken for one the camera actually recorded.
+		captured := "-"
+		if p.CapturedAt != nil {
+			mark := "?"
+			if p.CapturedAtSource != nil {
+				switch *p.CapturedAtSource {
+				case "exif":
+					mark = "E"
+				case "filesystem":
+					mark = "F"
+				}
+			}
+			captured = p.CapturedAt.Format("2006-01-02 15:04") + " " + mark
+		}
+
+		gps := "-"
+		if p.Latitude != nil && p.Longitude != nil {
+			gps = fmt.Sprintf("%.3f,%.3f", *p.Latitude, *p.Longitude)
+		}
+
+		fmt.Fprintf(out, "%-10s  %-5s  %-9s  %-18s  %-14s  %s\n",
+			humanBytes(p.FileSizeBytes), format, dims, captured, gps, p.RelativePath)
 	}
+	fmt.Fprintf(out, "\n  CAPTURED:  E = from EXIF,  F = from file mtime (less reliable)\n")
 
 	shown := offset + len(resp.Photos)
 	fmt.Fprintf(out, "\nShowing %d-%d of %d\n", offset+1, shown, resp.Total)

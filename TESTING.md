@@ -9,7 +9,7 @@ output differs from what's written here, that's a real finding — tell me.
 
 ## 0. Prerequisites
 
-Docker Desktop must be running. Go 1.23+ is optional (only for `go test`).
+Docker Desktop must be running. Go 1.25+ is optional (only for `go test`).
 
 > **If Docker Desktop won't start** — it failed for me twice during this build
 > with `initializing Inference manager: ... The file cannot be accessed by the

@@ -18,22 +18,24 @@ import (
 
 // Server wires dependencies into an http.Handler.
 type Server struct {
-	cfg     *config.Config
-	pool    *pgxpool.Pool
-	store   *store.Store
-	scanner *ingest.Scanner
-	log     *slog.Logger
+	cfg       *config.Config
+	pool      *pgxpool.Pool
+	store     *store.Store
+	scanner   *ingest.Scanner
+	processor *ingest.Processor
+	log       *slog.Logger
 	// startedAt lets /healthz report uptime, which is a cheap way to notice a
 	// process that is silently crash-looping.
 	startedAt time.Time
 }
 
-func NewServer(cfg *config.Config, pool *pgxpool.Pool, st *store.Store, scanner *ingest.Scanner, log *slog.Logger) *Server {
+func NewServer(cfg *config.Config, pool *pgxpool.Pool, st *store.Store, scanner *ingest.Scanner, processor *ingest.Processor, log *slog.Logger) *Server {
 	return &Server{
 		cfg:       cfg,
 		pool:      pool,
 		store:     st,
 		scanner:   scanner,
+		processor: processor,
 		log:       log,
 		startedAt: time.Now(),
 	}
@@ -60,6 +62,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/libraries/{id}", s.handleGetLibrary)
 	mux.HandleFunc("POST /api/libraries/{id}/scan", s.handleScanLibrary)
 	mux.HandleFunc("GET /api/libraries/{id}/photos", s.handleListPhotos)
+	mux.HandleFunc("POST /api/libraries/{id}/metadata", s.handleExtractMetadata)
 
 	return s.withRequestLogging(s.withRecovery(mux))
 }

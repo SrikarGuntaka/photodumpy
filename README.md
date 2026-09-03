@@ -38,7 +38,7 @@ Benchmarks are absent from this README on purpose. They will be added in Phase
 ## Requirements
 
 - Docker + Docker Compose
-- Go 1.23+ *(optional — only for running tests outside a container)*
+- Go 1.25+ *(optional — only for running tests outside a container)*
 
 ## Running it
 

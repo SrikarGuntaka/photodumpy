@@ -4,7 +4,7 @@
 # Builder. One image builds all three binaries; they share ~all of their code,
 # so building them separately would mean compiling the same packages 3x.
 # ---------------------------------------------------------------------------
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /src
 

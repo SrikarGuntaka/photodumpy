@@ -133,14 +133,23 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	meta, err := s.store.SummariseMetadata(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("summarising metadata", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to summarise metadata")
+		return
+	}
+
 	resp := newLibraryResponse(lib, &count)
 	writeJSON(w, log, http.StatusOK, map[string]any{
 		"library":         resp,
 		"photos_by_state": byState,
-		// Whether THIS process is scanning. Distinct from scan_state, which is
-		// what the database believes -- if they disagree after a crash, that is
-		// worth being able to see.
-		"scanning_here": s.scanner.IsScanning(lib.ID),
+		"metadata":        meta,
+		// Whether THIS process is scanning/extracting. Distinct from
+		// scan_state, which is what the database believes -- if they disagree
+		// after a crash, that is worth being able to see.
+		"scanning_here":   s.scanner.IsScanning(lib.ID),
+		"extracting_here": s.processor.IsProcessing(lib.ID),
 	})
 }
 
@@ -307,4 +316,44 @@ func isInvalidUUID(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "invalid input syntax for type uuid") ||
 		strings.Contains(msg, "invalid UUID")
+}
+
+// handleExtractMetadata starts metadata extraction for a library.
+//
+// Async for the same reason scanning is: a large library takes longer than a
+// sensible HTTP timeout. Progress is polled from GET /api/libraries/{id},
+// which reads the counts extraction is already writing.
+//
+// In Phase 5 this endpoint stays but its body changes: instead of running the
+// work in-process it will enqueue one EXTRACT_METADATA job per photo and let
+// the worker pool consume them. The extraction code itself does not move.
+func (s *Server) handleExtractMetadata(w http.ResponseWriter, r *http.Request) {
+	log := loggerFrom(r.Context(), s.log)
+
+	lib, ok := s.lookupLibrary(w, r)
+	if !ok {
+		return
+	}
+
+	if err := requireDirectory(lib.RootPath); err != nil {
+		writeError(w, log, http.StatusBadRequest, "root_unavailable", err.Error())
+		return
+	}
+
+	if err := s.processor.StartAsync(r.Context(), lib); err != nil {
+		if errors.Is(err, ingest.ErrProcessingInProgress) {
+			writeError(w, log, http.StatusConflict, "processing_in_progress",
+				"metadata extraction is already running for this library")
+			return
+		}
+		log.Error("starting metadata extraction", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to start extraction")
+		return
+	}
+
+	writeJSON(w, log, http.StatusAccepted, map[string]any{
+		"library_id": lib.ID,
+		"status":     "extracting",
+		"message":    "metadata extraction started; poll GET /api/libraries/" + lib.ID + " for progress",
+	})
 }

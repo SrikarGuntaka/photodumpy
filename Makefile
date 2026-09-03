@@ -5,7 +5,7 @@
 
 SHELL := /bin/sh
 COMPOSE := docker compose
-GO_IMAGE := golang:1.23-alpine
+GO_IMAGE := golang:1.25-alpine
 # Run a throwaway Go container over the working tree, reusing the module cache
 # in a named volume so repeated invocations are fast.
 GO_RUN := docker run --rm -v "$(CURDIR)":/src -v photo-organizer-gomod:/go/pkg/mod -w /src $(GO_IMAGE)

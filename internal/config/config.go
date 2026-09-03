@@ -52,6 +52,11 @@ type Config struct {
 	// touched.
 	ThumbnailDir string
 
+	// ProcessConcurrency bounds how many photos are decoded simultaneously
+	// during metadata extraction. Zero means runtime.NumCPU(). This is one of
+	// the three places concurrency is bounded -- see DESIGN_DECISIONS.md.
+	ProcessConcurrency int
+
 	// APIBaseURL is used by the CLI to reach the API.
 	APIBaseURL string
 }
@@ -60,15 +65,16 @@ type Config struct {
 func Load() (*Config, error) {
 	l := &loader{}
 	cfg := &Config{
-		Env:              l.String("ENV", "development"),
-		DatabaseURL:      l.String("DATABASE_URL", ""),
-		DBMaxConns:       int32(l.Int("DB_MAX_CONNS", 10)),
-		DBConnectTimeout: l.Duration("DB_CONNECT_TIMEOUT", 30*time.Second),
-		HTTPAddr:         l.String("HTTP_ADDR", ":8080"),
-		ShutdownGrace:    l.Duration("SHUTDOWN_GRACE", 30*time.Second),
-		PhotoRoot:        l.String("PHOTO_ROOT", "/photos"),
-		ThumbnailDir:     l.String("THUMBNAIL_DIR", "/var/lib/photo-organizer/thumbnails"),
-		APIBaseURL:       l.String("API_BASE_URL", "http://localhost:8080"),
+		Env:                l.String("ENV", "development"),
+		DatabaseURL:        l.String("DATABASE_URL", ""),
+		DBMaxConns:         int32(l.Int("DB_MAX_CONNS", 10)),
+		DBConnectTimeout:   l.Duration("DB_CONNECT_TIMEOUT", 30*time.Second),
+		HTTPAddr:           l.String("HTTP_ADDR", ":8080"),
+		ShutdownGrace:      l.Duration("SHUTDOWN_GRACE", 30*time.Second),
+		PhotoRoot:          l.String("PHOTO_ROOT", "/photos"),
+		ThumbnailDir:       l.String("THUMBNAIL_DIR", "/var/lib/photo-organizer/thumbnails"),
+		ProcessConcurrency: l.Int("PROCESS_CONCURRENCY", 0),
+		APIBaseURL:         l.String("API_BASE_URL", "http://localhost:8080"),
 	}
 
 	lvl, err := parseLevel(l.String("LOG_LEVEL", "info"))
@@ -85,6 +91,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.HTTPAddr == "" {
 		l.errs = append(l.errs, fmt.Errorf("config: HTTP_ADDR must not be empty"))
+	}
+	if cfg.ProcessConcurrency < 0 {
+		l.errs = append(l.errs, fmt.Errorf("config: PROCESS_CONCURRENCY must be >= 0, got %d", cfg.ProcessConcurrency))
 	}
 	if len(l.errs) > 0 {
 		return nil, errors.Join(l.errs...)

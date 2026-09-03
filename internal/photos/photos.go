@@ -81,6 +81,31 @@ type Photo struct {
 	FileModifiedAt *time.Time `json:"file_modified_at,omitempty"`
 	DetectedFormat *string    `json:"detected_format,omitempty"`
 
+	// --- derived by metadata extraction (Phase 3) ------------------------
+	// All nullable: a photo that has not been processed yet, or one whose
+	// file carries no EXIF, legitimately has none of these.
+
+	// Width and Height are display dimensions, already adjusted for
+	// Orientation.
+	Width       *int `json:"width,omitempty"`
+	Height      *int `json:"height,omitempty"`
+	Orientation *int `json:"orientation,omitempty"`
+
+	CapturedAt *time.Time `json:"captured_at,omitempty"`
+	// CapturedAtSource is "exif" or "filesystem". Consumers must check it
+	// before treating CapturedAt as authoritative.
+	CapturedAtSource *string `json:"captured_at_source,omitempty"`
+
+	Latitude  *float64 `json:"latitude,omitempty"`
+	Longitude *float64 `json:"longitude,omitempty"`
+
+	CameraMake  *string `json:"camera_make,omitempty"`
+	CameraModel *string `json:"camera_model,omitempty"`
+
+	// MetadataExtractedAt is the idempotency marker: non-null means
+	// extraction has run, successfully or not.
+	MetadataExtractedAt *time.Time `json:"metadata_extracted_at,omitempty"`
+
 	State     State   `json:"state"`
 	LastError *string `json:"last_error,omitempty"`
 

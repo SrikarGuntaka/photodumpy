@@ -68,10 +68,13 @@ func run() error {
 	}
 
 	scanner := ingest.NewScanner(st, log)
+	processor := ingest.NewProcessor(st, log, ingest.ProcessorOptions{
+		Concurrency: cfg.ProcessConcurrency,
+	})
 
 	srv := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: api.NewServer(cfg, pool, st, scanner, log).Handler(),
+		Handler: api.NewServer(cfg, pool, st, scanner, processor, log).Handler(),
 		// Without these, a slow or malicious client can hold a connection open
 		// indefinitely. ReadHeaderTimeout in particular is the guard against
 		// Slowloris.
@@ -116,6 +119,9 @@ func run() error {
 	// idempotent.
 	if err := scanner.Shutdown(shutdownCtx); err != nil {
 		log.Warn("scans did not stop cleanly", "error", err)
+	}
+	if err := processor.Shutdown(shutdownCtx); err != nil {
+		log.Warn("metadata extraction did not stop cleanly", "error", err)
 	}
 
 	log.Info("stopped cleanly")
