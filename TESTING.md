@@ -22,15 +22,25 @@ Docker Desktop must be running. Go 1.23+ is optional (only for `go test`).
 >
 > Then start Docker Desktop. Both directories are recreated automatically.
 
-> **If you're in Git Bash**, prefix `docker compose exec` commands with
-> `MSYS_NO_PATHCONV=1`, or Git Bash rewrites `/photos` into a Windows path
-> before it reaches the container. PowerShell and CMD don't need this.
+### Shell differences — read this first
+
+Commands below are given for **PowerShell**, since that is the default on
+Windows. Two things break if you paste bash commands into PowerShell:
+
+- **`grep` does not exist.** Use `Select-String` instead.
+- **`curl` is an alias for `Invoke-WebRequest`**, which takes entirely
+  different parameters — `-H` and `-d` fail with a binding error. Use
+  `Invoke-RestMethod`, or call `curl.exe` explicitly.
+
+**In Git Bash instead?** The bash commands work, but prefix
+`docker compose exec` with `MSYS_NO_PATHCONV=1` or Git Bash rewrites `/photos`
+into a Windows path before it reaches the container.
 
 ---
 
 ## 1. Start clean
 
-```bash
+```powershell
 cd "C:/Users/srika/Documents/dev/photo dump cleaner"
 docker compose down -v
 docker compose up -d --build
@@ -44,7 +54,7 @@ docker compose up -d --build
 
 ## 2. Generate the test corpus
 
-```bash
+```powershell
 go run ./cmd/genfixtures -root ./sample-photos -clean
 ```
 
@@ -75,7 +85,7 @@ scan must find exactly that.
 
 ## 3. Health checks — Phase 1
 
-```bash
+```powershell
 docker compose exec api photo-organizer status
 ```
 
@@ -88,9 +98,9 @@ Database UP (0ms)
 Libraries 0
 ```
 
-```bash
-curl -s http://localhost:8080/healthz
-curl -s http://localhost:8080/readyz
+```powershell
+Invoke-RestMethod http://localhost:8080/healthz
+Invoke-RestMethod http://localhost:8080/readyz
 ```
 
 **Expect:** `{"status":"ok",...}` from both.
@@ -101,7 +111,7 @@ curl -s http://localhost:8080/readyz
 
 ## 4. Schema and migrations — Phase 1
 
-```bash
+```powershell
 docker compose exec postgres psql -U photo -d photoorganizer -c '\dt'
 docker compose exec postgres psql -U photo -d photoorganizer -c 'SELECT version, name, applied_at FROM schema_migrations'
 ```
@@ -115,17 +125,17 @@ migration row (version 1, `core`).
 
 ## 5. API survives a database restart — Phase 1
 
-```bash
+```powershell
 docker compose stop postgres
-curl -s -o /dev/null -w 'healthz: %{http_code}\n' http://localhost:8080/healthz
-curl -s -w '\nreadyz: %{http_code}\n' http://localhost:8080/readyz
+try { $null = Invoke-RestMethod http://localhost:8080/healthz -ErrorAction Stop; "healthz: 200" } catch { "healthz: $([int]$_.Exception.Response.StatusCode)" }
+try { $null = Invoke-RestMethod http://localhost:8080/readyz  -ErrorAction Stop; "readyz:  200" } catch { "readyz:  $([int]$_.Exception.Response.StatusCode)" }
 ```
 
 **Expect:** `healthz: 200` and `readyz: 503`.
 
-```bash
+```powershell
 docker compose start postgres
-# wait ~5 seconds
+Start-Sleep -Seconds 5
 docker compose exec api photo-organizer status
 ```
 
@@ -139,11 +149,11 @@ blip doesn't cause a restart loop. Readiness does, and recovers on its own.
 
 ## 6. Migrations are immutable — Phase 1
 
-```bash
-echo "-- tampered" >> migrations/0001_core.sql
+```powershell
+Add-Content migrations/0001_core.sql "-- tampered"
 docker compose up -d --build api
-# wait ~10 seconds
-docker compose logs api --tail 3
+Start-Sleep -Seconds 10
+docker compose logs api --tail 5
 ```
 
 **Expect:** the API refuses to start:
@@ -156,7 +166,7 @@ immutable -- add a new one instead
 
 **Restore it:**
 
-```bash
+```powershell
 git checkout migrations/0001_core.sql
 docker compose up -d --build api
 ```
@@ -168,10 +178,14 @@ doesn't match the repo.
 
 ## 7. Originals cannot be modified — Phase 1
 
-```bash
-docker compose exec api sh -c 'touch /photos/EVIL.txt'
+```powershell
+docker compose exec api sh -c "touch /photos/EVIL.txt"
 docker compose exec api id
 ```
+
+(PowerShell wraps the touch failure in a red `NativeCommandError` block — that
+is PowerShell reporting a non-zero exit code, not an additional problem. The
+`Read-only file system` message inside it is the result you want.)
 
 **Expect:** `Read-only file system`, and `uid=10001(photouser)`.
 
@@ -182,7 +196,7 @@ convention. Container runs non-root.
 
 ## 8. Scan the folder — Phase 2
 
-```bash
+```powershell
 docker compose exec api photo-organizer scan /photos -wait
 ```
 
@@ -209,10 +223,14 @@ Fixed, with a regression test.)
 
 Run the exact same command again:
 
-```bash
+```powershell
 docker compose exec api photo-organizer scan /photos -wait
-docker compose logs api | grep "scan complete"
+docker compose logs api | Select-String "scan complete"
 ```
+
+> To see **both** numbers you need a library that has never been scanned. If
+> yours already exists, reset first with `docker compose down -v` then
+> `docker compose up -d`, and scan twice.
 
 **Expect two lines** — the second is the important one:
 
@@ -229,21 +247,36 @@ matches the manifest's unsupported file count.
 
 ## 10. Path traversal is blocked — Phase 2
 
-```bash
-for p in /etc /photos/../etc ../../../../etc/passwd /var/lib/postgresql; do
-  curl -s -o /dev/null -w "$p -> %{http_code}\n" \
-    -X POST http://localhost:8080/api/libraries \
-    -H 'Content-Type: application/json' -d "{\"path\":\"$p\"}"
-done
+```powershell
+foreach ($p in @('/etc','/photos/../etc','../../../../etc/passwd','/var/lib/postgresql','/photos')) {
+  $body = "{`"path`":`"$p`"}"
+  try {
+    $null = Invoke-RestMethod -Uri http://localhost:8080/api/libraries -Method Post `
+      -ContentType 'application/json' -Body $body -ErrorAction Stop
+    "{0,-28} -> ACCEPTED" -f $p
+  } catch {
+    "{0,-28} -> {1} rejected" -f $p, [int]$_.Exception.Response.StatusCode
+  }
+}
 ```
 
-**Expect:** every one returns `400`.
+**Expect:** the four escape attempts rejected, `/photos` accepted:
+
+```
+/etc                         -> 400 rejected
+/photos/../etc               -> 400 rejected
+../../../../etc/passwd       -> 400 rejected
+/var/lib/postgresql          -> 400 rejected
+/photos                      -> ACCEPTED
+```
 
 Check the error body:
 
-```bash
-curl -s -X POST http://localhost:8080/api/libraries \
-  -H 'Content-Type: application/json' -d '{"path":"/etc"}'
+```powershell
+try {
+  Invoke-RestMethod -Uri http://localhost:8080/api/libraries -Method Post `
+    -ContentType 'application/json' -Body '{"path":"/etc"}' -ErrorAction Stop
+} catch { $_.ErrorDetails.Message }
 ```
 
 **Expect:**
@@ -255,17 +288,13 @@ curl -s -X POST http://localhost:8080/api/libraries \
 **Note what's absent:** no filesystem path is echoed back. On a traversal
 attempt that would confirm what does and doesn't exist outside the root.
 
-And a legitimate relative path still works:
+The loop above already covers the positive case — `/photos` is accepted while
+every escape attempt is refused, which is the point: the check rejects
+traversal without rejecting legitimate paths.
 
-```bash
-curl -s -o /dev/null -w 'trip -> %{http_code}\n' \
-  -X POST http://localhost:8080/api/libraries \
-  -H 'Content-Type: application/json' -d '{"path":"trip"}'
-```
+Clean up any extra libraries the loop created:
 
-**Expect:** `201`. Clean it up:
-
-```bash
+```powershell
 docker compose exec postgres psql -U photo -d photoorganizer -c "DELETE FROM libraries WHERE root_path <> '/photos'"
 ```
 
@@ -273,13 +302,13 @@ docker compose exec postgres psql -U photo -d photoorganizer -c "DELETE FROM lib
 
 ## 11. Inspect what was found — Phase 2
 
-```bash
+```powershell
 docker compose exec api photo-organizer libraries
 ```
 
 Copy the library id, then:
 
-```bash
+```powershell
 docker compose exec api photo-organizer photos <library-id> -limit 8
 ```
 
@@ -294,7 +323,7 @@ docker compose exec api photo-organizer photos <library-id> -limit 8
 
 Pagination:
 
-```bash
+```powershell
 docker compose exec api photo-organizer photos <library-id> -limit 5 -offset 20
 ```
 
@@ -304,7 +333,7 @@ docker compose exec api photo-organizer photos <library-id> -limit 5 -offset 20
 
 Simulate a crash mid-scan by marking a scan started and killing the API:
 
-```bash
+```powershell
 docker compose exec postgres psql -U photo -d photoorganizer \
   -c "UPDATE libraries SET last_scan_started_at = now(), last_scan_finished_at = NULL"
 docker compose exec api photo-organizer libraries
@@ -312,10 +341,10 @@ docker compose exec api photo-organizer libraries
 
 **Expect:** scan state shows `scanning` (a stuck scan).
 
-```bash
+```powershell
 docker compose restart api
-# wait ~8 seconds
-docker compose logs api | grep reconciled
+Start-Sleep -Seconds 8
+docker compose logs api | Select-String reconciled
 docker compose exec api photo-organizer libraries
 ```
 
@@ -330,7 +359,7 @@ marked running was interrupted.
 
 ## 13. Automated tests
 
-```bash
+```powershell
 go test ./...
 ```
 
@@ -340,13 +369,13 @@ go test ./...
 Two symlink tests **skip on Windows** (creating symlinks needs elevation). To
 run them on Linux:
 
-```bash
+```powershell
 make test
 ```
 
 Integration tests against real Postgres:
 
-```bash
+```powershell
 make test-integration
 ```
 
@@ -374,7 +403,7 @@ Worth knowing so you don't report these as bugs:
 
 ## Teardown
 
-```bash
+```powershell
 docker compose down       # keep data
 docker compose down -v    # delete the database volume too
 ```
