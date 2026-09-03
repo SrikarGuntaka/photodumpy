@@ -334,8 +334,7 @@ docker compose exec api photo-organizer photos <library-id> -limit 5 -offset 20
 Simulate a crash mid-scan by marking a scan started and killing the API:
 
 ```powershell
-docker compose exec postgres psql -U photo -d photoorganizer \
-  -c "UPDATE libraries SET last_scan_started_at = now(), last_scan_finished_at = NULL"
+docker compose exec postgres psql -U photo -d photoorganizer -c "UPDATE libraries SET last_scan_started_at = now(), last_scan_finished_at = NULL"
 docker compose exec api photo-organizer libraries
 ```
 
