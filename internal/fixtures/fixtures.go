@@ -75,6 +75,17 @@ type File struct {
 	DuplicateGroup string `json:"duplicate_group,omitempty"`
 	SimilarGroup   string `json:"similar_group,omitempty"`
 
+	// CorruptStage records WHERE a damaged file fails, because "corrupt" is
+	// stage-dependent and the pipeline treats the two cases differently:
+	//
+	//   "header" -> image.DecodeConfig fails; no metadata is recoverable
+	//   "pixels" -> header and EXIF are intact and metadata extracts fine,
+	//               but a full pixel decode fails (a half-written file)
+	//
+	// Phase 3 reads headers only, so a "pixels" file succeeds there and fails
+	// later in the phases that touch actual pixels.
+	CorruptStage string `json:"corrupt_stage,omitempty"`
+
 	// Ground truth for quality analysis.
 	Blurry       bool `json:"blurry,omitempty"`
 	Underexposed bool `json:"underexposed,omitempty"`
@@ -363,7 +374,7 @@ func Generate(opts Options) (*Manifest, error) {
 	// detection will accept it; decoding must fail cleanly and mark the photo
 	// failed rather than crashing a worker.
 	if err := write("misc/truncated.jpg", []byte("\xff\xd8\xff\xe0 this is not a real jpeg"), File{
-		Kind: "corrupt",
+		Kind: "corrupt", CorruptStage: "header",
 	}); err != nil {
 		return nil, err
 	}
@@ -375,13 +386,18 @@ func Generate(opts Options) (*Manifest, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := write("misc/half-written.jpg", full[:len(full)/2], File{Kind: "corrupt"}); err != nil {
+		// Header and EXIF survive; the entropy-coded pixel data does not. This
+		// is the realistic "interrupted copy" case, and the one that proves
+		// metadata extraction does not need intact pixels.
+		if err := write("misc/half-written.jpg", full[:len(full)/2], File{
+			Kind: "corrupt", CorruptStage: "pixels",
+		}); err != nil {
 			return nil, err
 		}
 	}
 
 	// Zero-byte file with an image extension.
-	if err := write("misc/empty.jpg", nil, File{Kind: "corrupt"}); err != nil {
+	if err := write("misc/empty.jpg", nil, File{Kind: "corrupt", CorruptStage: "header"}); err != nil {
 		return nil, err
 	}
 
