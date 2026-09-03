@@ -20,8 +20,8 @@ Built in phases, each independently runnable and testable.
 |-------|-------|--------|
 | 1 | Skeleton: Postgres, migrations, config, Docker Compose, health endpoints, CLI | **Done** |
 | 2 | Local folder ingestion (`scan`) | **Done** |
-| 3 | Metadata extraction (EXIF, GPS, dimensions) | Next |
-| 4 | Exact duplicate detection (SHA-256) | Planned |
+| 3 | Metadata extraction (EXIF, GPS, dimensions) | **Done** |
+| 4 | Exact duplicate detection (SHA-256) | Next |
 | 5 | Distributed job queue: leases, retries, crash recovery | Planned |
 | 6 | Near-duplicate detection (perceptual hashing) | Planned |
 | 7 | Quality analysis (sharpness, exposure, contrast) | Planned |
@@ -83,7 +83,8 @@ The API is on <http://localhost:8080>:
 | `GET /api/libraries` | List libraries. |
 | `GET /api/libraries/{id}` | One library, with photo counts by state. |
 | `POST /api/libraries/{id}/scan` | Start a scan. Returns 202; poll the library for progress. |
-| `GET /api/libraries/{id}/photos` | Paginated photo list. |
+| `POST /api/libraries/{id}/metadata` | Extract EXIF/GPS/dimensions. Returns 202; poll for progress. |
+| `GET /api/libraries/{id}/photos` | Paginated photo list with metadata. |
 
 ## Scanning a folder
 
@@ -115,6 +116,37 @@ and `inserted` separately so that is visible rather than merely claimed.
 **Paths are validated.** The API refuses any path outside the configured
 `PHOTO_ROOT`, including via `..` traversal or a symlink pointing out of the
 tree. In Docker that root is the read-only `/photos` mount.
+
+## Extracting metadata
+
+```bash
+docker compose exec api photo-organizer process <library-id> -wait
+```
+
+```
+  42 / 42 extracted. Done.
+
+  EXIF timestamp        33
+  filesystem timestamp  7
+  no timestamp          2
+  GPS coordinates       24
+  failed to decode      2
+```
+
+Dimensions come from the image header rather than a full decode, so this reads
+a few hundred bytes per file instead of decoding every pixel.
+
+**Missing metadata is normal, not an error.** A photo with no EXIF falls back
+to filesystem mtime and records that it did so in `captured_at_source`; the
+photo listing marks those `F` rather than `E` so a guessed date is never
+mistaken for one the camera recorded. Photos with no GPS keep `NULL`
+coordinates -- never `(0,0)`, which is a real place in the Gulf of Guinea and
+is what a GPS chip emits when it has no fix.
+
+**EXIF timestamps have no timezone.** The wall clock is interpreted as UTC,
+uniformly, so the same photo scanned on two machines gets the same
+`captured_at`. See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for why that is
+the least-wrong option.
 
 ## Common tasks
 

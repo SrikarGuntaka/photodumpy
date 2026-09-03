@@ -250,13 +250,47 @@ keep, and every read query wants them.
 Columns are added by the migration for the phase that first writes them, so the
 schema never contains columns no code touches.
 
-## 6. Processing stages **(planned)**
+## 6. Processing stages
+
+### Metadata extraction (implemented, Phase 3)
+
+```
+POST /api/libraries/{id}/metadata
+      |
+      +-> claim 200 rows WHERE metadata_extracted_at IS NULL   <- partial index
+          for each: acquire semaphore slot  (cap = PROCESS_CONCURRENCY)
+                    open file, re-stat, read header + EXIF
+                    UPDATE photos SET ... , metadata_extracted_at = now()
+          repeat until no rows remain
+```
+
+Dimensions come from `image.DecodeConfig`, which reads the header only -- a few
+hundred bytes rather than decoding a 12-megapixel image.
+
+The semaphore slot is acquired *before* the goroutine is spawned, so the number
+of live goroutines is capped rather than merely their throughput. Batching the
+row claim keeps memory independent of library size.
+
+`ExtractOne` is a standalone method precisely so Phase 5's `EXTRACT_METADATA`
+handler can call it unchanged; the queue then supplies the leases, retries and
+crash recovery that the local loop provides today.
+
+Failure handling separates three cases that look alike:
+
+| Condition | Outcome | Why |
+|-----------|---------|-----|
+| File deleted since scan | state `missing`, job **succeeds** | Retrying a file that does not exist is waste |
+| Undecodable image | state `failed`, permanent | Retrying will not change the bytes |
+| Permission denied | returned for retry | May genuinely resolve |
+
+`metadata_extracted_at` is set in every terminal case, including failure --
+otherwise the processor would retry the same corrupt file forever.
 
 ### Per-photo jobs — parallel, one row each
 
 | Job | Phase | Writes |
 |-----|-------|--------|
-| `EXTRACT_METADATA` | 3 | dimensions, capture time, GPS, format |
+| `EXTRACT_METADATA` | 3 | dimensions, capture time, GPS, format *(implemented; runs in-process until Phase 5)* |
 | `COMPUTE_FILE_HASH` | 4 | `sha256` (streamed, never fully buffered) |
 | `GENERATE_THUMBNAIL` | 6 | `thumbnail_path` |
 | `COMPUTE_PERCEPTUAL_HASH` | 6 | `phash` |
