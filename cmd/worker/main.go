@@ -1,15 +1,13 @@
-// Command worker is the job-processing binary.
+// Command worker consumes jobs from the PostgreSQL-backed queue.
 //
-// PHASE 1 STATUS: THIS IS A DELIBERATE STUB.
+// Scale it with:
 //
-// The real worker -- registration, heartbeats, lease renewal, bounded-concurrency
-// job execution and crash recovery -- arrives in Phase 5. What exists today is
-// only the process shell: configuration, database connection, and graceful
-// shutdown. It claims no jobs and processes nothing, and it says so in its logs.
+//	docker compose up -d --scale worker=4
 //
-// It exists now rather than in Phase 5 so that the Docker image, Compose wiring
-// and shutdown behaviour are exercised from the start, and because the signal
-// handling below is real code that Phase 5 builds on rather than replaces.
+// Killing one mid-flight (`docker compose kill worker`) is the crash path: its
+// leases expire and another worker picks the work up. Stopping one
+// (`docker compose stop worker`) is the clean path: it releases its leases
+// immediately and the work is reassigned in milliseconds.
 package main
 
 import (
@@ -17,11 +15,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
-	"time"
 
 	"github.com/srikarguntaka/photo-organizer/internal/config"
 	"github.com/srikarguntaka/photo-organizer/internal/database"
+	"github.com/srikarguntaka/photo-organizer/internal/ingest"
+	"github.com/srikarguntaka/photo-organizer/internal/store"
+	"github.com/srikarguntaka/photo-organizer/internal/worker"
 )
 
 func main() {
@@ -43,36 +44,33 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := database.Connect(ctx, cfg.DatabaseURL, cfg.DBMaxConns, cfg.DBConnectTimeout, log)
+	concurrency := cfg.ProcessConcurrency
+	if concurrency <= 0 {
+		concurrency = runtime.NumCPU()
+	}
+
+	// The pool is sized to concurrency plus headroom. The headroom is not
+	// arbitrary: heartbeat, lease renewal and the reaper each need a connection
+	// on a schedule, and if job execution could consume every connection those
+	// loops would stall -- a worker that cannot renew its leases loses its
+	// work while still holding it.
+	pool, err := database.Connect(ctx, cfg.DatabaseURL, int32(concurrency+4), cfg.DBConnectTimeout, log)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 
-	// Workers never run migrations. Only the API does, so schema changes have
-	// exactly one owner and scaling workers cannot cause a migration stampede.
-	log.Warn("worker is a Phase 1 stub: it is connected but claims no jobs (job queue lands in Phase 5)")
+	// Workers never run migrations. The API owns the schema, so scaling to 16
+	// workers cannot cause a migration stampede.
 
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	st := store.New(pool)
+	processor := ingest.NewProcessor(st, log, ingest.ProcessorOptions{Concurrency: concurrency})
 
-	for {
-		select {
-		case <-ctx.Done():
-			log.Info("shutdown signal received, stopping cleanly")
-			return nil
-		case <-ticker.C:
-			// Proves the database connection survives idling and that a
-			// Postgres restart is recovered from, which is worth verifying
-			// before the real work depends on it.
-			pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			err := pool.Ping(pingCtx)
-			cancel()
-			if err != nil {
-				log.Error("database ping failed", "error", err)
-				continue
-			}
-			log.Debug("idle: database reachable")
-		}
-	}
+	w := worker.New(st, log, worker.Options{
+		Concurrency:   concurrency,
+		ShutdownGrace: cfg.ShutdownGrace,
+	})
+	worker.NewHandlers(st, processor, log).RegisterAll(w)
+
+	return w.Run(ctx)
 }

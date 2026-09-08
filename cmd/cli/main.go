@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +35,9 @@ Commands:
   process <library-id>   Extract metadata (EXIF, GPS, dimensions) for a library
   hash <library-id>      Compute SHA-256 hashes and find exact duplicates
   duplicates <lib-id>    Show exact-duplicate groups (suggestions only)
+  queue <library-id>     Enqueue the pipeline as jobs for the worker pool
+  jobs <library-id>      Show queue state
+  workers                Show the worker fleet
   photos <library-id>    List photos in a library
   version                Print the client version
 
@@ -127,6 +131,18 @@ func run(args []string, out io.Writer) error {
 			return errors.New("duplicates requires a library id: photo-organizer duplicates <library-id>")
 		}
 		return cmdDuplicates(ctx, c, out, rest[0], *limit, *offset)
+	case "queue":
+		if len(rest) < 1 {
+			return errors.New("queue requires a library id: photo-organizer queue <library-id>")
+		}
+		return cmdQueue(ctx, c, out, rest[0], *wait)
+	case "jobs":
+		if len(rest) < 1 {
+			return errors.New("jobs requires a library id: photo-organizer jobs <library-id>")
+		}
+		return cmdJobs(ctx, c, out, rest[0])
+	case "workers":
+		return cmdWorkers(ctx, c, out)
 	case "photos":
 		if len(rest) < 1 {
 			return errors.New("photos requires a library id: photo-organizer photos <library-id>")
@@ -311,6 +327,44 @@ type duplicateGroup struct {
 type duplicatesResponse struct {
 	Groups  []duplicateGroup `json:"groups"`
 	Summary duplicateSummary `json:"summary"`
+}
+
+type jobCounts struct {
+	Pending   int `json:"pending"`
+	Running   int `json:"running"`
+	Succeeded int `json:"succeeded"`
+	Dead      int `json:"dead"`
+	Total     int `json:"total"`
+}
+
+type queueResponse struct {
+	LibraryID string    `json:"library_id"`
+	Enqueued  int       `json:"enqueued"`
+	Queue     jobCounts `json:"queue"`
+}
+
+type jobsResponse struct {
+	Total  jobCounts            `json:"total"`
+	ByType map[string]jobCounts `json:"by_type"`
+}
+
+type workerRow struct {
+	ID              string    `json:"id"`
+	Hostname        string    `json:"hostname"`
+	PID             int       `json:"pid"`
+	Status          string    `json:"status"`
+	Concurrency     int       `json:"concurrency"`
+	RunningJobs     int       `json:"running_jobs"`
+	LastHeartbeatAt time.Time `json:"last_heartbeat_at"`
+}
+
+type workersResponse struct {
+	Workers []workerRow `json:"workers"`
+	Summary struct {
+		Active      int `json:"active"`
+		TotalSlots  int `json:"total_slots"`
+		RunningJobs int `json:"running_jobs"`
+	} `json:"summary"`
 }
 
 type libraryDetailResponse struct {
@@ -523,6 +577,139 @@ func printMetadataSummary(out io.Writer, m metadataSummary) {
 	fmt.Fprintf(out, "  GPS coordinates       %d\n", m.WithGPS)
 	if m.Failed > 0 {
 		fmt.Fprintf(out, "  failed to decode      %d\n", m.Failed)
+	}
+}
+
+// cmdQueue enqueues the pipeline as jobs and optionally watches it drain.
+func cmdQueue(ctx context.Context, c *client, out io.Writer, libraryID string, wait bool) error {
+	var resp queueResponse
+	if _, err := c.do(ctx, http.MethodPost, "/api/libraries/"+libraryID+"/process", nil, &resp); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Enqueued %d new jobs.\n", resp.Enqueued)
+	if resp.Enqueued == 0 && resp.Queue.Total > 0 {
+		fmt.Fprintln(out, "(Nothing new -- the work is already queued or done.)")
+	}
+	fmt.Fprintln(out)
+
+	if !wait {
+		fmt.Fprintf(out, "Watch it with:  photo-organizer jobs %s\n", libraryID)
+		return nil
+	}
+
+	const interval = 500 * time.Millisecond
+	last := -1
+	for {
+		var jr jobsResponse
+		if _, err := c.get(ctx, "/api/libraries/"+libraryID+"/jobs", &jr); err != nil {
+			return err
+		}
+		t := jr.Total
+		done := t.Succeeded + t.Dead
+
+		if done != last {
+			fmt.Fprintf(out, "\r  %d/%d done  (%d running, %d pending)   ",
+				done, t.Total, t.Running, t.Pending)
+			last = done
+		}
+
+		if t.Pending == 0 && t.Running == 0 && t.Total > 0 {
+			fmt.Fprintf(out, "\r  %d/%d done  (%d succeeded, %d dead)        \n\n",
+				done, t.Total, t.Succeeded, t.Dead)
+			printJobTable(out, jr.ByType)
+			if t.Dead > 0 {
+				fmt.Fprintf(out, "\n%d job(s) exhausted their retries. Inspect with:\n"+
+					"  docker compose exec postgres psql -U photo -d photoorganizer "+
+					"-c \"SELECT job_type, last_error, count(*) FROM jobs WHERE status='dead' "+
+					"GROUP BY 1,2\"\n", t.Dead)
+			}
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			fmt.Fprintln(out)
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+func cmdJobs(ctx context.Context, c *client, out io.Writer, libraryID string) error {
+	var jr jobsResponse
+	if _, err := c.get(ctx, "/api/libraries/"+libraryID+"/jobs", &jr); err != nil {
+		return err
+	}
+	if jr.Total.Total == 0 {
+		fmt.Fprintf(out, "No jobs queued. Create some with:  photo-organizer queue %s\n", libraryID)
+		return nil
+	}
+	printJobTable(out, jr.ByType)
+
+	t := jr.Total
+	fmt.Fprintf(out, "\n%-22s  %6d  %6d  %6d  %6d  %6d\n",
+		"TOTAL", t.Pending, t.Running, t.Succeeded, t.Dead, t.Total)
+	return nil
+}
+
+func printJobTable(out io.Writer, byType map[string]jobCounts) {
+	fmt.Fprintf(out, "%-22s  %6s  %6s  %6s  %6s  %6s\n",
+		"JOB TYPE", "PEND", "RUN", "OK", "DEAD", "TOTAL")
+
+	// Stable order: Go map iteration is randomised, and a table that reshuffles
+	// between polls is unreadable.
+	names := make([]string, 0, len(byType))
+	for name := range byType {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		c := byType[name]
+		fmt.Fprintf(out, "%-22s  %6d  %6d  %6d  %6d  %6d\n",
+			name, c.Pending, c.Running, c.Succeeded, c.Dead, c.Total)
+	}
+}
+
+func cmdWorkers(ctx context.Context, c *client, out io.Writer) error {
+	var resp workersResponse
+	if _, err := c.get(ctx, "/api/workers", &resp); err != nil {
+		return err
+	}
+
+	if len(resp.Workers) == 0 {
+		fmt.Fprintln(out, "No workers have ever registered.")
+		fmt.Fprintln(out, "Start some with:  docker compose up -d --scale worker=4")
+		return nil
+	}
+
+	fmt.Fprintf(out, "Active %d   Slots %d   Running jobs %d\n\n",
+		resp.Summary.Active, resp.Summary.TotalSlots, resp.Summary.RunningJobs)
+
+	fmt.Fprintf(out, "%-10s  %-16s  %-7s  %5s  %5s  %s\n",
+		"STATUS", "HOSTNAME", "PID", "SLOTS", "JOBS", "LAST SEEN")
+	for _, w := range resp.Workers {
+		fmt.Fprintf(out, "%-10s  %-16s  %-7d  %5d  %5d  %s\n",
+			w.Status, truncate(w.Hostname, 16), w.PID, w.Concurrency, w.RunningJobs,
+			humanAgo(w.LastHeartbeatAt))
+	}
+
+	fmt.Fprintln(out, "\nstopped = shut down cleanly and handed its work back")
+	fmt.Fprintln(out, "dead    = stopped heartbeating; its leases were reclaimed by the reaper")
+	return nil
+}
+
+func humanAgo(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < 2*time.Second:
+		return "just now"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	}
 }
 

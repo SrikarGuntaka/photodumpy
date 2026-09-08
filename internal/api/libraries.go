@@ -432,3 +432,98 @@ func (s *Server) handleListDuplicates(w http.ResponseWriter, r *http.Request) {
 		"note": "suggestions only; no files have been or will be deleted by this application",
 	})
 }
+
+// handleProcessLibrary fans out the per-photo pipeline as queued jobs.
+//
+// This supersedes the in-process /metadata and /hash endpoints: instead of
+// doing the work in the API, it enqueues and lets the worker pool consume.
+// The endpoint returns immediately with how many jobs were created.
+func (s *Server) handleProcessLibrary(w http.ResponseWriter, r *http.Request) {
+	log := loggerFrom(r.Context(), s.log)
+
+	lib, ok := s.lookupLibrary(w, r)
+	if !ok {
+		return
+	}
+
+	enqueued, err := s.scanner.EnqueuePhotoJobs(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("enqueuing jobs", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to enqueue jobs")
+		return
+	}
+
+	counts, err := s.store.CountAllJobs(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("counting jobs", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to count jobs")
+		return
+	}
+
+	log.Info("enqueued jobs", "library_id", lib.ID, "new_jobs", enqueued)
+	writeJSON(w, log, http.StatusAccepted, map[string]any{
+		"library_id": lib.ID,
+		"enqueued":   enqueued,
+		"queue":      counts,
+		"message":    "jobs queued; workers will consume them. Poll GET /api/libraries/" + lib.ID + "/jobs",
+	})
+}
+
+// handleListJobs reports queue state for a library.
+func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	log := loggerFrom(r.Context(), s.log)
+
+	lib, ok := s.lookupLibrary(w, r)
+	if !ok {
+		return
+	}
+
+	byType, err := s.store.CountJobsByType(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("counting jobs by type", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to count jobs")
+		return
+	}
+
+	total, err := s.store.CountAllJobs(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("counting jobs", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to count jobs")
+		return
+	}
+
+	writeJSON(w, log, http.StatusOK, map[string]any{
+		"total":   total,
+		"by_type": byType,
+	})
+}
+
+// handleListWorkers reports the worker fleet.
+func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
+	log := loggerFrom(r.Context(), s.log)
+
+	workers, err := s.store.ListWorkers(r.Context())
+	if err != nil {
+		log.Error("listing workers", "error", err)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to list workers")
+		return
+	}
+
+	active, capacity, running := 0, 0, 0
+	for _, wk := range workers {
+		if wk.Status == "active" {
+			active++
+			capacity += wk.Concurrency
+		}
+		running += wk.RunningJobs
+	}
+
+	writeJSON(w, log, http.StatusOK, map[string]any{
+		"workers": workers,
+		"summary": map[string]int{
+			"active":       active,
+			"total_slots":  capacity,
+			"running_jobs": running,
+		},
+	})
+}

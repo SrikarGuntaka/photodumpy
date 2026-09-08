@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srikarguntaka/photo-organizer/internal/jobs"
 	"github.com/srikarguntaka/photo-organizer/internal/photos"
 	"github.com/srikarguntaka/photo-organizer/internal/store"
 )
@@ -226,4 +227,74 @@ func (s *Scanner) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return fmt.Errorf("ingest: scans did not stop within the shutdown grace period: %w", ctx.Err())
 	}
+}
+
+// EnqueuePhotoJobs queues the per-photo pipeline for every photo in a library
+// that still needs it, plus the aggregate stage that follows.
+//
+// This is the Phase 5 replacement for the in-process passes: instead of doing
+// the work here, the API fans out jobs and the worker pool consumes them. The
+// work itself did not move -- the handlers call the same ExtractOne and
+// HashOne this package already exposed.
+//
+// Enqueueing is idempotent (a partial unique index on dedupe_key), so calling
+// this repeatedly while jobs are outstanding is a no-op rather than a way to
+// multiply the queue.
+//
+// Paging is by KEYSET (id > cursor), not OFFSET. The listing predicate is
+// "still needs work", which enqueueing does not change -- the worker completing
+// the job does, later. An OFFSET pager would therefore either loop forever on
+// page one or skip rows as the set shifted underneath it. Carrying the last id
+// forward is correct regardless of what the workers are doing concurrently.
+func (s *Scanner) EnqueuePhotoJobs(ctx context.Context, libraryID string) (int, error) {
+	const pageSize = 1000
+	total := 0
+
+	for _, spec := range []struct {
+		jobType jobs.Type
+		list    func(context.Context, string, string, int) ([]string, error)
+	}{
+		{jobs.TypeExtractMetadata, s.store.ListPhotoIDsNeedingMetadata},
+		{jobs.TypeComputeFileHash, s.store.ListPhotoIDsNeedingHash},
+	} {
+		cursor := ""
+		for {
+			if ctx.Err() != nil {
+				return total, ctx.Err()
+			}
+
+			ids, err := spec.list(ctx, libraryID, cursor, pageSize)
+			if err != nil {
+				return total, err
+			}
+			if len(ids) == 0 {
+				break
+			}
+
+			batch := make([]jobs.Enqueue, len(ids))
+			for i, id := range ids {
+				batch[i] = jobs.NewPhotoJob(spec.jobType, id, libraryID)
+			}
+			n, err := s.store.EnqueueJobs(ctx, batch)
+			if err != nil {
+				return total, err
+			}
+			total += n
+
+			if len(ids) < pageSize {
+				break
+			}
+			cursor = ids[len(ids)-1]
+		}
+	}
+
+	// The aggregate stage. One per library, at a lower priority so the
+	// per-photo work it depends on drains first.
+	n, err := s.store.EnqueueJobs(ctx, []jobs.Enqueue{
+		jobs.NewLibraryJob(jobs.TypeBuildDuplicateGroups, libraryID),
+	})
+	if err != nil {
+		return total, err
+	}
+	return total + n, nil
 }

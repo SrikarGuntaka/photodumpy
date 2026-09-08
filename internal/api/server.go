@@ -66,5 +66,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/libraries/{id}/hash", s.handleHashLibrary)
 	mux.HandleFunc("GET /api/libraries/{id}/duplicates", s.handleListDuplicates)
 
+	// Job queue (Phase 5). /process enqueues work for the worker pool; the
+	// older /metadata and /hash endpoints still run in-process and are kept
+	// so the pipeline can be exercised without any workers running.
+	mux.HandleFunc("POST /api/libraries/{id}/process", s.handleProcessLibrary)
+	mux.HandleFunc("GET /api/libraries/{id}/jobs", s.handleListJobs)
+	mux.HandleFunc("GET /api/workers", s.handleListWorkers)
+
 	return s.withRequestLogging(s.withRecovery(mux))
 }
