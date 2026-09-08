@@ -133,6 +133,13 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dupes, err := s.store.SummariseDuplicates(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("summarising duplicates", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to summarise duplicates")
+		return
+	}
+
 	meta, err := s.store.SummariseMetadata(r.Context(), lib.ID)
 	if err != nil {
 		log.Error("summarising metadata", "error", err, "library_id", lib.ID)
@@ -145,11 +152,13 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		"library":         resp,
 		"photos_by_state": byState,
 		"metadata":        meta,
+		"duplicates":      dupes,
 		// Whether THIS process is scanning/extracting. Distinct from
 		// scan_state, which is what the database believes -- if they disagree
 		// after a crash, that is worth being able to see.
 		"scanning_here":   s.scanner.IsScanning(lib.ID),
 		"extracting_here": s.processor.IsProcessing(lib.ID),
+		"hashing_here":    s.processor.IsHashing(lib.ID),
 	})
 }
 
@@ -355,5 +364,71 @@ func (s *Server) handleExtractMetadata(w http.ResponseWriter, r *http.Request) {
 		"library_id": lib.ID,
 		"status":     "extracting",
 		"message":    "metadata extraction started; poll GET /api/libraries/" + lib.ID + " for progress",
+	})
+}
+
+// handleHashLibrary starts content hashing, which rebuilds duplicate groups on
+// completion.
+func (s *Server) handleHashLibrary(w http.ResponseWriter, r *http.Request) {
+	log := loggerFrom(r.Context(), s.log)
+
+	lib, ok := s.lookupLibrary(w, r)
+	if !ok {
+		return
+	}
+	if err := requireDirectory(lib.RootPath); err != nil {
+		writeError(w, log, http.StatusBadRequest, "root_unavailable", err.Error())
+		return
+	}
+
+	if err := s.processor.StartHashAsync(r.Context(), lib); err != nil {
+		if errors.Is(err, ingest.ErrProcessingInProgress) {
+			writeError(w, log, http.StatusConflict, "processing_in_progress",
+				"hashing is already running for this library")
+			return
+		}
+		log.Error("starting hashing", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to start hashing")
+		return
+	}
+
+	writeJSON(w, log, http.StatusAccepted, map[string]any{
+		"library_id": lib.ID,
+		"status":     "hashing",
+		"message":    "hashing started; poll GET /api/libraries/" + lib.ID + " for progress",
+	})
+}
+
+// handleListDuplicates returns exact-duplicate groups, biggest win first.
+func (s *Server) handleListDuplicates(w http.ResponseWriter, r *http.Request) {
+	log := loggerFrom(r.Context(), s.log)
+
+	lib, ok := s.lookupLibrary(w, r)
+	if !ok {
+		return
+	}
+
+	q := r.URL.Query()
+	groups, err := s.store.ListDuplicateGroups(r.Context(), lib.ID,
+		atoiDefault(q.Get("limit"), 50), atoiDefault(q.Get("offset"), 0))
+	if err != nil {
+		log.Error("listing duplicates", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to list duplicates")
+		return
+	}
+
+	summary, err := s.store.SummariseDuplicates(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("summarising duplicates", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to summarise duplicates")
+		return
+	}
+
+	writeJSON(w, log, http.StatusOK, map[string]any{
+		"groups":  groups,
+		"summary": summary,
+		// Stated explicitly in the payload so no client can mistake these for
+		// actions already taken. Nothing is ever deleted by this system.
+		"note": "suggestions only; no files have been or will be deleted by this application",
 	})
 }

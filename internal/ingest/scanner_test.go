@@ -85,8 +85,13 @@ func buildTree(t *testing.T, files map[string]string) string {
 
 func newScanner(t *testing.T, st *store.Store) *Scanner {
 	t.Helper()
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	return NewScanner(st, log)
+	return NewScanner(st, testLogger(t))
+}
+
+// testLogger keeps integration test output readable -- warnings and above only.
+func testLogger(t *testing.T) *slog.Logger {
+	t.Helper()
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }
 
 func TestScanInsertsDiscoveredPhotos(t *testing.T) {

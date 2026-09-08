@@ -32,6 +32,8 @@ Commands:
   libraries              List registered libraries
   scan <path>            Register a folder (if new) and scan it for photos
   process <library-id>   Extract metadata (EXIF, GPS, dimensions) for a library
+  hash <library-id>      Compute SHA-256 hashes and find exact duplicates
+  duplicates <lib-id>    Show exact-duplicate groups (suggestions only)
   photos <library-id>    List photos in a library
   version                Print the client version
 
@@ -115,6 +117,16 @@ func run(args []string, out io.Writer) error {
 			return errors.New("process requires a library id: photo-organizer process <library-id>")
 		}
 		return cmdProcess(ctx, c, out, rest[0], *wait)
+	case "hash":
+		if len(rest) < 1 {
+			return errors.New("hash requires a library id: photo-organizer hash <library-id>")
+		}
+		return cmdHash(ctx, c, out, rest[0], *wait)
+	case "duplicates":
+		if len(rest) < 1 {
+			return errors.New("duplicates requires a library id: photo-organizer duplicates <library-id>")
+		}
+		return cmdDuplicates(ctx, c, out, rest[0], *limit, *offset)
 	case "photos":
 		if len(rest) < 1 {
 			return errors.New("photos requires a library id: photo-organizer photos <library-id>")
@@ -272,12 +284,43 @@ type metadataSummary struct {
 	Failed       int `json:"failed"`
 }
 
+type duplicateSummary struct {
+	Groups           int   `json:"groups"`
+	DuplicateFiles   int   `json:"duplicate_files"`
+	ReclaimableBytes int64 `json:"reclaimable_bytes"`
+	Hashed           int   `json:"hashed"`
+	PendingHash      int   `json:"pending_hash"`
+}
+
+type duplicateMember struct {
+	PhotoID       string `json:"photo_id"`
+	RelativePath  string `json:"relative_path"`
+	FileSizeBytes int64  `json:"file_size_bytes"`
+	SuggestedKeep bool   `json:"suggested_keep"`
+}
+
+type duplicateGroup struct {
+	ID               string            `json:"id"`
+	SHA256           string            `json:"sha256"`
+	PhotoCount       int               `json:"photo_count"`
+	TotalBytes       int64             `json:"total_bytes"`
+	ReclaimableBytes int64             `json:"reclaimable_bytes"`
+	Photos           []duplicateMember `json:"photos"`
+}
+
+type duplicatesResponse struct {
+	Groups  []duplicateGroup `json:"groups"`
+	Summary duplicateSummary `json:"summary"`
+}
+
 type libraryDetailResponse struct {
-	Library        library         `json:"library"`
-	PhotosByState  map[string]int  `json:"photos_by_state"`
-	Metadata       metadataSummary `json:"metadata"`
-	ScanningHere   bool            `json:"scanning_here"`
-	ExtractingHere bool            `json:"extracting_here"`
+	Library        library          `json:"library"`
+	PhotosByState  map[string]int   `json:"photos_by_state"`
+	Metadata       metadataSummary  `json:"metadata"`
+	Duplicates     duplicateSummary `json:"duplicates"`
+	ScanningHere   bool             `json:"scanning_here"`
+	ExtractingHere bool             `json:"extracting_here"`
+	HashingHere    bool             `json:"hashing_here"`
 }
 
 type photo struct {
@@ -481,6 +524,100 @@ func printMetadataSummary(out io.Writer, m metadataSummary) {
 	if m.Failed > 0 {
 		fmt.Fprintf(out, "  failed to decode      %d\n", m.Failed)
 	}
+}
+
+// cmdHash starts content hashing and optionally waits for it.
+func cmdHash(ctx context.Context, c *client, out io.Writer, libraryID string, wait bool) error {
+	if _, err := c.do(ctx, http.MethodPost, "/api/libraries/"+libraryID+"/hash", nil, nil); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "Hashing started.")
+
+	if !wait {
+		fmt.Fprintf(out, "\nPoll progress with:  photo-organizer duplicates %s\n", libraryID)
+		return nil
+	}
+
+	const interval = 400 * time.Millisecond
+	last := -1
+	for {
+		var detail libraryDetailResponse
+		if _, err := c.get(ctx, "/api/libraries/"+libraryID, &detail); err != nil {
+			return err
+		}
+		d := detail.Duplicates
+
+		if d.Hashed != last {
+			fmt.Fprintf(out, "\r  %d hashed, %d pending...", d.Hashed, d.PendingHash)
+			last = d.Hashed
+		}
+
+		if d.PendingHash == 0 && !detail.HashingHere {
+			fmt.Fprintf(out, "\r  %d photos hashed. Done.\n\n", d.Hashed)
+			fmt.Fprintf(out, "  duplicate groups      %d\n", d.Groups)
+			fmt.Fprintf(out, "  duplicate files       %d\n", d.DuplicateFiles)
+			fmt.Fprintf(out, "  reclaimable           %s\n", humanBytes(d.ReclaimableBytes))
+			if d.Groups > 0 {
+				fmt.Fprintf(out, "\nReview them with:  photo-organizer duplicates %s\n", libraryID)
+			}
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			fmt.Fprintln(out)
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+// cmdDuplicates lists exact-duplicate groups.
+func cmdDuplicates(ctx context.Context, c *client, out io.Writer, libraryID string, limit, offset int) error {
+	var resp duplicatesResponse
+	url := fmt.Sprintf("/api/libraries/%s/duplicates?limit=%d&offset=%d", libraryID, limit, offset)
+	if _, err := c.get(ctx, url, &resp); err != nil {
+		return err
+	}
+
+	s := resp.Summary
+	fmt.Fprintf(out, "Duplicate groups   %d\n", s.Groups)
+	fmt.Fprintf(out, "Duplicate files    %d\n", s.DuplicateFiles)
+	fmt.Fprintf(out, "Reclaimable        %s\n", humanBytes(s.ReclaimableBytes))
+	if s.PendingHash > 0 {
+		fmt.Fprintf(out, "\n%d photos are not hashed yet -- run 'hash' first for a complete picture.\n", s.PendingHash)
+	}
+	fmt.Fprintln(out)
+
+	if len(resp.Groups) == 0 {
+		if s.Hashed == 0 {
+			fmt.Fprintf(out, "Nothing hashed yet. Run:  photo-organizer hash %s -wait\n", libraryID)
+		} else {
+			fmt.Fprintln(out, "No exact duplicates found.")
+		}
+		return nil
+	}
+
+	for i, g := range resp.Groups {
+		fmt.Fprintf(out, "Group %d  %s  (%d copies, %s reclaimable)\n",
+			offset+i+1, g.SHA256[:12], g.PhotoCount, humanBytes(g.ReclaimableBytes))
+		for _, p := range g.Photos {
+			marker := "  duplicate"
+			if p.SuggestedKeep {
+				marker = "  KEEP     "
+			}
+			fmt.Fprintf(out, "  %s  %-10s  %s\n", marker, humanBytes(p.FileSizeBytes), p.RelativePath)
+		}
+		fmt.Fprintln(out)
+	}
+
+	// Repeated in the CLI as well as the API payload. A user acting on these
+	// suggestions is about to delete their own photos by hand, and it should be
+	// unambiguous that this tool has not touched anything.
+	fmt.Fprintln(out, "These are suggestions. No files have been modified, moved or deleted.")
+	fmt.Fprintln(out, "KEEP marks the copy with the shortest, least-nested path -- for exact")
+	fmt.Fprintln(out, "duplicates every copy is byte-identical, so this picks a path, not a photo.")
+	return nil
 }
 
 func cmdPhotos(ctx context.Context, c *client, out io.Writer, libraryID string, limit, offset int) error {

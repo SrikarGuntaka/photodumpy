@@ -63,6 +63,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/libraries/{id}/scan", s.handleScanLibrary)
 	mux.HandleFunc("GET /api/libraries/{id}/photos", s.handleListPhotos)
 	mux.HandleFunc("POST /api/libraries/{id}/metadata", s.handleExtractMetadata)
+	mux.HandleFunc("POST /api/libraries/{id}/hash", s.handleHashLibrary)
+	mux.HandleFunc("GET /api/libraries/{id}/duplicates", s.handleListDuplicates)
 
 	return s.withRequestLogging(s.withRecovery(mux))
 }

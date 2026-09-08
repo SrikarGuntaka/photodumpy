@@ -260,6 +260,13 @@ func (p *Processor) ProcessLibrary(ctx context.Context, lib *photos.Library) (*M
 			}(photo)
 		}
 
+		// Wait for this batch before claiming the next. Without it the loop
+		// re-queries while the batch is still in flight; those goroutines have
+		// not written metadata_extracted_at yet, so the same rows come back and
+		// are processed again. The duplicated work is invisible in the data
+		// (the writes are idempotent) but wastes I/O and inflates the counters.
+		wg.Wait()
+
 		if ctx.Err() != nil {
 			result.Interrupted = true
 			break
