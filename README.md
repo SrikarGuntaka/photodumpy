@@ -21,8 +21,8 @@ Built in phases, each independently runnable and testable.
 | 1 | Skeleton: Postgres, migrations, config, Docker Compose, health endpoints, CLI | **Done** |
 | 2 | Local folder ingestion (`scan`) | **Done** |
 | 3 | Metadata extraction (EXIF, GPS, dimensions) | **Done** |
-| 4 | Exact duplicate detection (SHA-256) | Next |
-| 5 | Distributed job queue: leases, retries, crash recovery | Planned |
+| 4 | Exact duplicate detection (SHA-256) | **Done** |
+| 5 | Distributed job queue: leases, retries, crash recovery | Next |
 | 6 | Near-duplicate detection (perceptual hashing) | Planned |
 | 7 | Quality analysis (sharpness, exposure, contrast) | Planned |
 | 8 | Time + location clustering | Planned |
@@ -84,6 +84,8 @@ The API is on <http://localhost:8080>:
 | `GET /api/libraries/{id}` | One library, with photo counts by state. |
 | `POST /api/libraries/{id}/scan` | Start a scan. Returns 202; poll the library for progress. |
 | `POST /api/libraries/{id}/metadata` | Extract EXIF/GPS/dimensions. Returns 202; poll for progress. |
+| `POST /api/libraries/{id}/hash` | Compute SHA-256 and rebuild duplicate groups. Returns 202. |
+| `GET /api/libraries/{id}/duplicates` | Exact-duplicate groups, biggest saving first. |
 | `GET /api/libraries/{id}/photos` | Paginated photo list with metadata. |
 
 ## Scanning a folder
@@ -189,6 +191,31 @@ generator decides, so a test can assert. Real photo libraries are the better
 verify correctness.
 
 To use your own photos instead, set `HOST_PHOTOS_DIR` in `.env`.
+
+## Finding exact duplicates
+
+```bash
+docker compose exec api photo-organizer hash <library-id> -wait
+docker compose exec api photo-organizer duplicates <library-id>
+```
+
+```
+Group 1  462559bb7813  (3 copies, 99.8 KB reclaimable)
+    duplicate  49.9 KB     misc/nested/deep/scene09 (1).jpg
+    duplicate  49.9 KB     trip/day2/scene09-copy.jpg
+    KEEP       49.9 KB     trip/day2/scene09.jpg
+```
+
+Hashes are streamed, so memory does not scale with file size. Detection is
+content-based, so copies are found regardless of filename or directory.
+
+**KEEP picks a path, not a photo.** For exact duplicates every copy is
+byte-identical, so the heuristic chooses the one most likely to be the original:
+shallowest directory, then shortest name, then alphabetical. That last tiebreak
+makes the suggestion stable across runs.
+
+**Nothing is deleted.** There is no delete path in this application. The output
+is a list for you to act on yourself.
 
 ## Testing
 

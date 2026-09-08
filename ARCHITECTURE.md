@@ -291,7 +291,7 @@ otherwise the processor would retry the same corrupt file forever.
 | Job | Phase | Writes |
 |-----|-------|--------|
 | `EXTRACT_METADATA` | 3 | dimensions, capture time, GPS, format *(implemented; runs in-process until Phase 5)* |
-| `COMPUTE_FILE_HASH` | 4 | `sha256` (streamed, never fully buffered) |
+| `COMPUTE_FILE_HASH` | 4 | `sha256` (streamed, never fully buffered) *(implemented)* |
 | `GENERATE_THUMBNAIL` | 6 | `thumbnail_path` |
 | `COMPUTE_PERCEPTUAL_HASH` | 6 | `phash` |
 | `ANALYZE_QUALITY` | 7 | sharpness, exposure, contrast, quality score |
@@ -304,7 +304,7 @@ values. That is what makes at-least-once delivery safe.
 
 | Stage | Phase | Why not per-photo |
 |-------|-------|-------------------|
-| `BUILD_DUPLICATE_GROUPS` | 4 | Needs a global `GROUP BY sha256`; sharding means merging partial groups |
+| `BUILD_DUPLICATE_GROUPS` | 4 | Needs a global `GROUP BY sha256`; sharding means merging partial groups *(implemented)* |
 | `BUILD_PHOTO_CLUSTERS` | 8 | Inherently sequential — a cluster boundary depends on neighbouring photos |
 | `RANK_SIMILAR_PHOTOS` | 6 | Operates on already-formed groups |
 
