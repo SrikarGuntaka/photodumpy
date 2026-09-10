@@ -53,6 +53,7 @@ func (h *Handlers) RegisterAll(w *Worker) {
 	w.Register(jobs.TypeExtractMetadata, h.ExtractMetadata)
 	w.Register(jobs.TypeComputeFileHash, h.ComputeFileHash)
 	w.Register(jobs.TypeComputePerceptualHash, h.ComputePerceptualHash)
+	w.Register(jobs.TypeAnalyzeQuality, h.AnalyzeQuality)
 	w.Register(jobs.TypeBuildDuplicateGroups, h.BuildDuplicateGroups)
 	w.Register(jobs.TypeBuildSimilarGroups, h.BuildSimilarGroups)
 }
@@ -124,19 +125,46 @@ func (h *Handlers) ComputePerceptualHash(ctx context.Context, job jobs.Job) erro
 	})
 }
 
+// AnalyzeQuality handles one ANALYZE_QUALITY job.
+func (h *Handlers) AnalyzeQuality(ctx context.Context, job jobs.Job) error {
+	lib, err := h.store.GetLibrary(ctx, job.LibraryID)
+	if err != nil {
+		return h.libraryError(err)
+	}
+
+	photo, err := h.store.GetPhoto(ctx, job.TargetID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return jobs.Permanent(fmt.Errorf("photo %s no longer exists", job.TargetID))
+		}
+		return fmt.Errorf("loading photo: %w", err)
+	}
+
+	return h.processor.AnalyzeOne(ctx, lib.RootPath, store.PhotoNeedingQuality{
+		ID:           photo.ID,
+		RelativePath: photo.RelativePath,
+	})
+}
+
 // BuildSimilarGroups handles the near-duplicate aggregate stage.
 //
 // Same prerequisite discipline as BuildDuplicateGroups: it refuses to run
 // while the perceptual hashing it depends on is still outstanding, because
 // grouping over a partially-hashed library produces a confident wrong answer.
 func (h *Handlers) BuildSimilarGroups(ctx context.Context, job jobs.Job) error {
-	outstanding, err := h.store.CountOutstandingJobsOfType(ctx, job.LibraryID, jobs.TypeComputePerceptualHash)
-	if err != nil {
-		return fmt.Errorf("checking perceptual hashing progress: %w", err)
-	}
-	if outstanding > 0 {
-		return jobs.Defer(2*time.Second,
-			fmt.Sprintf("%d COMPUTE_PERCEPTUAL_HASH jobs still outstanding", outstanding))
+	// Two prerequisites, not one. Perceptual hashes decide MEMBERSHIP; quality
+	// scores decide which member to suggest keeping. Running before quality
+	// lands would produce correct groups with a worse recommendation, and
+	// nothing would revisit it.
+	for _, prereq := range []jobs.Type{jobs.TypeComputePerceptualHash, jobs.TypeAnalyzeQuality} {
+		outstanding, err := h.store.CountOutstandingJobsOfType(ctx, job.LibraryID, prereq)
+		if err != nil {
+			return fmt.Errorf("checking %s progress: %w", prereq, err)
+		}
+		if outstanding > 0 {
+			return jobs.Defer(2*time.Second,
+				fmt.Sprintf("%d %s jobs still outstanding", outstanding, prereq))
+		}
 	}
 
 	groups, reclaimable, err := h.store.RebuildSimilarGroups(ctx, job.LibraryID, h.similarityThreshold)

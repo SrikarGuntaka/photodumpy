@@ -36,6 +36,7 @@ Commands:
   hash <library-id>      Compute SHA-256 hashes and find exact duplicates
   duplicates <lib-id>    Show exact-duplicate groups (suggestions only)
   similar <library-id>   Show near-duplicate groups (suggestions only)
+  quality <library-id>   Show photos with technical defects (measurements only)
   queue <library-id>     Enqueue the pipeline as jobs for the worker pool
   jobs <library-id>      Show queue state
   workers                Show the worker fleet
@@ -89,6 +90,8 @@ func run(args []string, out io.Writer) error {
 	wait := fs.Bool("wait", false, "poll until the scan finishes")
 	limit := fs.Int("limit", 20, "page size for 'photos'")
 	offset := fs.Int("offset", 0, "page offset for 'photos'")
+	flag_ := fs.String("flag", "", "filter 'quality' to one flag, e.g. possibly_blurry")
+	flag := flag_
 
 	positional, err := parseInterleaved(fs, args)
 	if err != nil {
@@ -137,6 +140,11 @@ func run(args []string, out io.Writer) error {
 			return errors.New("similar requires a library id: photo-organizer similar <library-id>")
 		}
 		return cmdSimilar(ctx, c, out, rest[0], *limit, *offset)
+	case "quality":
+		if len(rest) < 1 {
+			return errors.New("quality requires a library id: photo-organizer quality <library-id>")
+		}
+		return cmdQuality(ctx, c, out, rest[0], *flag, *limit, *offset)
 	case "queue":
 		if len(rest) < 1 {
 			return errors.New("queue requires a library id: photo-organizer queue <library-id>")
@@ -368,6 +376,30 @@ type similarGroup struct {
 type similarResponse struct {
 	Groups  []similarGroup `json:"groups"`
 	Summary similarSummary `json:"summary"`
+}
+
+type qualitySummary struct {
+	Analyzed    int            `json:"analyzed"`
+	Pending     int            `json:"pending"`
+	Flagged     int            `json:"flagged"`
+	ByFlag      map[string]int `json:"by_flag"`
+	MeanQuality *float64       `json:"mean_quality_score"`
+}
+
+type qualityPhoto struct {
+	PhotoID      string   `json:"photo_id"`
+	RelativePath string   `json:"relative_path"`
+	Width        *int     `json:"width"`
+	Height       *int     `json:"height"`
+	Sharpness    *float64 `json:"sharpness"`
+	Exposure     *float64 `json:"exposure"`
+	Quality      *float64 `json:"quality_score"`
+	Flags        []string `json:"flags"`
+}
+
+type qualityResponse struct {
+	Photos  []qualityPhoto `json:"photos"`
+	Summary qualitySummary `json:"summary"`
 }
 
 type jobCounts struct {
@@ -619,6 +651,93 @@ func printMetadataSummary(out io.Writer, m metadataSummary) {
 	if m.Failed > 0 {
 		fmt.Fprintf(out, "  failed to decode      %d\n", m.Failed)
 	}
+}
+
+// cmdQuality lists photos carrying technical-defect flags.
+func cmdQuality(ctx context.Context, c *client, out io.Writer, libraryID, flag string, limit, offset int) error {
+	var resp qualityResponse
+	url := fmt.Sprintf("/api/libraries/%s/quality?limit=%d&offset=%d&flag=%s",
+		libraryID, limit, offset, flag)
+	if _, err := c.get(ctx, url, &resp); err != nil {
+		return err
+	}
+
+	s := resp.Summary
+	fmt.Fprintf(out, "Analyzed           %d\n", s.Analyzed)
+	if s.Pending > 0 {
+		fmt.Fprintf(out, "Pending            %d  (results incomplete)\n", s.Pending)
+	}
+	fmt.Fprintf(out, "Flagged            %d\n", s.Flagged)
+	if s.MeanQuality != nil {
+		fmt.Fprintf(out, "Mean score         %.2f\n", *s.MeanQuality)
+	}
+
+	if len(s.ByFlag) > 0 {
+		fmt.Fprintln(out)
+		names := make([]string, 0, len(s.ByFlag))
+		for n := range s.ByFlag {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			fmt.Fprintf(out, "  %-26s %d\n", n, s.ByFlag[n])
+		}
+	}
+	fmt.Fprintln(out)
+
+	if len(resp.Photos) == 0 {
+		if s.Analyzed == 0 {
+			fmt.Fprintf(out, "Nothing analyzed yet. Run:  photo-organizer queue %s -wait\n", libraryID)
+		} else {
+			fmt.Fprintln(out, "No photos carry quality flags.")
+		}
+		return nil
+	}
+
+	fmt.Fprintf(out, "%-6s  %-6s  %-6s  %-9s  %-34s  %s\n",
+		"SCORE", "SHARP", "EXPOS", "DIMS", "FLAGS", "PATH")
+	for _, p := range resp.Photos {
+		fmt.Fprintf(out, "%-6s  %-6s  %-6s  %-9s  %-34s  %s\n",
+			fmtScore(p.Quality), fmtScore(p.Sharpness), fmtScore(p.Exposure),
+			fmtDims(p.Width, p.Height), joinFlags(p.Flags), p.RelativePath)
+	}
+
+	fmt.Fprintln(out, "\nThese are measurements of pixels, not judgements of photographic merit.")
+	fmt.Fprintln(out, "A shallow depth-of-field portrait is genuinely blurry by Laplacian variance")
+	fmt.Fprintln(out, "and may be the best photo in your library. Nothing has been deleted.")
+	return nil
+}
+
+func fmtScore(v *float64) string {
+	if v == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.2f", *v)
+}
+
+func fmtDims(w, h *int) string {
+	if w == nil || h == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%dx%d", *w, *h)
+}
+
+func joinFlags(flags []string) string {
+	out := ""
+	for i, f := range flags {
+		if i > 0 {
+			out += ","
+		}
+		// Trim the shared prefix so the column stays readable.
+		out += strings.TrimPrefix(f, "possibly_")
+	}
+	if out == "" {
+		return "-"
+	}
+	if len(out) > 34 {
+		return out[:31] + "..."
+	}
+	return out
 }
 
 // cmdSimilar lists near-duplicate groups.

@@ -413,3 +413,94 @@ than only a yes/no.
 **Cap at 24.** Random unrelated hashes differ by ~32 bits, so a threshold near
 that groups everything with everything. 24 is where the feature stops being
 meaningful.
+
+---
+
+## 17. Sharpness is measured at a fixed analysis size, on purpose
+
+Two ranking bugs in Phase 7 came from the same root cause, and both were first
+"fixed" in the wrong place before the measurement itself was corrected.
+
+### Thumbnails outranking their own originals
+
+The near-duplicate ranker recommended keeping `scene18-small.jpg` (320×240)
+over `scene18.jpg` (640×480), because the thumbnail scored sharpness 1.00
+against the original's 0.42.
+
+Laplacian variance measures detail **density** — response per pixel. Downscaling
+does not throw detail away so much as concentrate it. Measuring one image at
+several sizes, with the original rule that left images under 512px at their
+native resolution:
+
+Measured before the pre-smooth described below existed, so the absolute values
+are higher than the code produces today; the ratio between the columns is the
+point.
+
+| size | measured natively | scaled to 512 |
+|------|-------------------|---------------|
+| 1600×1200 | 71.5 | 71.5 |
+| 640×480 | 72.2 | 72.2 |
+| 320×240 | **405.1** | 67.9 |
+| 160×120 | **2686.0** | 39.5 |
+
+A 160×120 thumbnail scored 37× its own source.
+
+The first attempt added a `resolutionParity` guard to the ranker: refuse to let
+quality decide between images more than 2× apart in pixel count. It broke two
+legitimate tests — a blurred 12MP frame should lose to a sharp 3MP one — and
+that was the signal. The guard was papering over an unreliable measurement
+rather than fixing it. **Every** image is now scaled to a 512px long edge,
+including images already smaller, and the sequence is monotonic. The guard and
+its tests were deleted.
+
+### Recompressed copies outranking their originals
+
+With that fixed, the ranker still preferred `scene02-recompressed.jpg`
+(24.7 KB) over `scene02.jpg` (62.9 KB) — same scene, same dimensions, one a
+strictly degraded re-encode of the other.
+
+A Laplacian responds to any sharp intensity change, and lossy JPEG
+quantisation manufactures plenty that are not in the photograph: 8×8 block
+edges and ringing around contours. The operator cannot distinguish artifact
+energy from subject detail, so the damaged file measures as *sharper*.
+
+The fix is a separable 1-2-1 binomial pre-smooth (σ ≈ 0.85) before the
+Laplacian runs. Blocking artifacts live at the very top of the frequency range;
+real edges span several pixels and mostly survive.
+
+| pair | no pre-smooth | with pre-smooth |
+|------|---------------|-----------------|
+| scene02 original / recompressed | 57.70 / 75.49 (**+31%**) | 35.90 / 38.22 (+6.5%) |
+| scene10 original / recompressed | 104.56 / 124.78 (**+19%**) | 68.68 / 70.67 (+2.9%) |
+| scene18 original / recompressed | 88.31 / 107.07 (**+21%**) | 57.70 / 59.42 (+3.0%) |
+
+That residual is worth about 0.005 on the overall score — inside the ranker's
+0.02 quality tolerance — so file size correctly breaks the tie and the original
+is kept in all three groups.
+
+Note what was *not* done: the tolerance was not widened to 0.05. Before the
+pre-smooth the three artifact-induced gaps were 0.019, 0.020 and 0.022, so two
+groups ranked correctly and one did not, purely by where they fell relative to
+an arbitrary constant. Tuning the constant would have hidden the defect in
+exactly the way the `resolutionParity` guard did.
+
+The pre-smooth also improves the thing the metric is named for. On the five
+fixtures measured both ways, the worst-case ratio between the least-blurred
+blurred frame and the least-sharp sharp one went from 24× (66.79 / 2.79) to
+57× (38.69 / 0.68): the smoothing removes sensor-level noise that was propping
+up the blurred frames' floor.
+The blur threshold moved from 0.15 to 0.12 to sit near the centre of the
+widened gap (blurred 0.020–0.047, everything else 0.200–0.591 across 39
+analysable fixtures, zero misclassifications in either direction).
+
+`sharpnessSaturation` dropped from 500 to 310 at the same time: the pre-smooth
+costs in-focus images roughly 38% of their variance, and leaving the constant
+alone would have shifted every score down without changing any ordering, while
+making values stored before and after the change incomparable.
+
+**The honest limitation**, as with the similarity threshold: this is calibrated
+against synthetic fixtures. Real photographs, especially soft-focus portraits
+and night shots, will sit differently. That is why the thresholds are
+configuration rather than constants, and why `raw_laplacian_variance` is stored
+alongside the normalised score — a future recalibration is then a SQL update
+rather than a re-decode of the whole library.

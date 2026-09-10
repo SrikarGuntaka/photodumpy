@@ -13,6 +13,7 @@ import (
 
 	"github.com/srikarguntaka/photo-organizer/internal/metadata"
 	"github.com/srikarguntaka/photo-organizer/internal/photos"
+	"github.com/srikarguntaka/photo-organizer/internal/quality"
 	"github.com/srikarguntaka/photo-organizer/internal/store"
 )
 
@@ -141,6 +142,10 @@ type Processor struct {
 	// concurrency bounds how many files are open and being decoded at once.
 	concurrency int
 
+	// thresholds are the quality cut-offs. Configuration rather than
+	// constants, because every one of them is a judgement call.
+	thresholds quality.Thresholds
+
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
 	wg      sync.WaitGroup
@@ -151,6 +156,10 @@ type ProcessorOptions struct {
 	// Concurrency is the number of photos processed simultaneously. Zero means
 	// runtime.NumCPU().
 	Concurrency int
+
+	// QualityThresholds override the calibrated defaults. The zero value uses
+	// quality.DefaultThresholds().
+	QualityThresholds *quality.Thresholds
 }
 
 func NewProcessor(st *store.Store, log *slog.Logger, opts ProcessorOptions) *Processor {
@@ -161,10 +170,16 @@ func NewProcessor(st *store.Store, log *slog.Logger, opts ProcessorOptions) *Pro
 		// reasonable default that does not oversubscribe either resource.
 		c = runtime.NumCPU()
 	}
+	th := quality.DefaultThresholds()
+	if opts.QualityThresholds != nil {
+		th = *opts.QualityThresholds
+	}
+
 	return &Processor{
 		store:       st,
 		log:         log,
 		concurrency: c,
+		thresholds:  th,
 		running:     make(map[string]context.CancelFunc),
 	}
 }

@@ -7,9 +7,14 @@ import (
 	"image/color"
 	"image/jpeg"
 	"math"
+	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 
 	"golang.org/x/image/draw"
+
+	"github.com/srikarguntaka/photo-organizer/internal/fixtures"
 )
 
 // TestCalibrateThreshold measures the separation between near-duplicate and
@@ -221,4 +226,65 @@ func noiseImage(w, h int, seed int64) image.Image {
 		}
 	}
 	return img
+}
+
+// TestCalibrateSimilarityGap measures the separation between near-duplicate
+// and unrelated distances, which is where DefaultSimilarityThreshold comes
+// from.
+//
+//	go test -run TestCalibrateSimilarityGap -v ./internal/hashing/
+func TestCalibrateSimilarityGap(t *testing.T) {
+	root := t.TempDir()
+	m, _ := fixtures.Generate(fixtures.Options{Root: root, Seed: 1, Scenes: 24})
+
+	h := func(rel string) uint64 {
+		f, _ := os.Open(filepath.Join(root, filepath.FromSlash(rel)))
+		defer f.Close()
+		v, err := DHashReader(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+
+	groups := map[string][]string{}
+	var reps []string
+	seen := map[string]bool{}
+	for _, f := range m.Files {
+		if f.Kind != "jpeg" || f.CorruptStage != "" {
+			continue
+		}
+		if f.SimilarGroup != "" {
+			groups[f.SimilarGroup] = append(groups[f.SimilarGroup], f.RelPath)
+			continue
+		}
+		if f.DuplicateGroup != "" {
+			continue
+		}
+		if b := filepath.Base(f.RelPath); !seen[b] {
+			seen[b] = true
+			reps = append(reps, f.RelPath)
+		}
+	}
+
+	var near []int
+	for _, paths := range groups {
+		for i := range paths {
+			for j := i + 1; j < len(paths); j++ {
+				near = append(near, HammingDistance(h(paths[i]), h(paths[j])))
+			}
+		}
+	}
+	var unrel []int
+	for i := range reps {
+		for j := i + 1; j < len(reps); j++ {
+			unrel = append(unrel, HammingDistance(h(reps[i]), h(reps[j])))
+		}
+	}
+	sort.Ints(near)
+	sort.Ints(unrel)
+	t.Logf("near-duplicate pairs n=%d: min %d, max %d", len(near), near[0], near[len(near)-1])
+	t.Logf("unrelated pairs     n=%d: min %d, max %d", len(unrel), unrel[0], unrel[len(unrel)-1])
+	t.Logf("GAP: near-max %d .. unrelated-min %d  (width %d)",
+		near[len(near)-1], unrel[0], unrel[0]-near[len(near)-1])
 }

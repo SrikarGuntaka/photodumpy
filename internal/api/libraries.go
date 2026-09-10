@@ -140,6 +140,13 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	qual, err := s.store.SummariseQuality(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("summarising quality", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to summarise")
+		return
+	}
+
 	similar, err := s.store.SummariseSimilar(r.Context(), lib.ID)
 	if err != nil {
 		log.Error("summarising similar", "error", err, "library_id", lib.ID)
@@ -161,6 +168,7 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		"metadata":        meta,
 		"duplicates":      dupes,
 		"similar":         similar,
+		"quality":         qual,
 		// Whether THIS process is scanning/extracting. Distinct from
 		// scan_state, which is what the database believes -- if they disagree
 		// after a crash, that is worth being able to see.
@@ -567,5 +575,41 @@ func (s *Server) handleListSimilar(w http.ResponseWriter, r *http.Request) {
 		"note": "suggestions only; no files have been or will be deleted by this application. " +
 			"distance is Hamming distance out of 64 bits; a group marked chained is wider " +
 			"than its threshold because members were connected through intermediates",
+	})
+}
+
+// handleListQuality returns photos carrying quality flags, worst first.
+func (s *Server) handleListQuality(w http.ResponseWriter, r *http.Request) {
+	log := loggerFrom(r.Context(), s.log)
+
+	lib, ok := s.lookupLibrary(w, r)
+	if !ok {
+		return
+	}
+
+	q := r.URL.Query()
+	candidates, err := s.store.ListFlaggedPhotos(r.Context(), lib.ID, q.Get("flag"),
+		atoiDefault(q.Get("limit"), 100), atoiDefault(q.Get("offset"), 0))
+	if err != nil {
+		log.Error("listing flagged photos", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to list flagged photos")
+		return
+	}
+
+	summary, err := s.store.SummariseQuality(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("summarising quality", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to summarise quality")
+		return
+	}
+
+	writeJSON(w, log, http.StatusOK, map[string]any{
+		"photos":  candidates,
+		"summary": summary,
+		// Stated in the payload, not only in the docs. These are measurements
+		// of pixels, and a client should not present them as verdicts.
+		"note": "these are objective measurements, not judgements of photographic merit. " +
+			"a shallow depth-of-field portrait is genuinely blurry by Laplacian variance and " +
+			"may be the best photo in the library. nothing is or will be deleted.",
 	})
 }

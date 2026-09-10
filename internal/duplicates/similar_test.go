@@ -461,3 +461,97 @@ func TestPathDoesNotOutrankResolution(t *testing.T) {
 			"files that are otherwise equal", groups[0].SuggestedKeepID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Quality-aware ranking (Phase 7)
+// ---------------------------------------------------------------------------
+
+func qf(v float64) *float64 { return &v }
+
+// The Phase 7 payoff: a sharp lower-resolution frame beats a blurred
+// higher-resolution one. Resolution and byte count describe the container;
+// quality describes the image.
+func TestQualityOutranksResolution(t *testing.T) {
+	base := uint64(0x0F0F0F0F0F0F0F0F)
+
+	candidates := []Candidate{
+		{PhotoID: "big-but-blurry", Hash: base, Width: 4000, Height: 3000,
+			FileSizeBytes: 8_000_000, RelativePath: "a.jpg", QualityScore: qf(0.21)},
+		{PhotoID: "smaller-but-sharp", Hash: base ^ 0b111, Width: 2000, Height: 1500,
+			FileSizeBytes: 2_000_000, RelativePath: "b.jpg", QualityScore: qf(0.83)},
+	}
+
+	groups := GroupSimilar(candidates, 12)
+	if len(groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(groups))
+	}
+	if groups[0].SuggestedKeepID != "smaller-but-sharp" {
+		t.Errorf("suggested keeping %q, want the sharp 3MP frame over the blurred 12MP one -- "+
+			"quality describes the image, resolution only describes the container",
+			groups[0].SuggestedKeepID)
+	}
+}
+
+// Quality must only decide when BOTH sides have been measured. Otherwise the
+// ranking would turn on whether analysis happened to have run yet.
+func TestUnmeasuredQualityFallsBackToResolution(t *testing.T) {
+	base := uint64(0x3333333333333333)
+
+	candidates := []Candidate{
+		// Measured but mediocre, and small.
+		{PhotoID: "small-measured", Hash: base, Width: 640, Height: 480,
+			FileSizeBytes: 100, RelativePath: "a.jpg", QualityScore: qf(0.9)},
+		// Not yet measured, but much larger.
+		{PhotoID: "large-unmeasured", Hash: base ^ 0b11, Width: 4000, Height: 3000,
+			FileSizeBytes: 100, RelativePath: "b.jpg"},
+	}
+
+	groups := GroupSimilar(candidates, 12)
+	if len(groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(groups))
+	}
+	if groups[0].SuggestedKeepID != "large-unmeasured" {
+		t.Errorf("suggested keeping %q; with only one side measured the ranking must fall "+
+			"back to resolution rather than rewarding whichever photo was analysed first",
+			groups[0].SuggestedKeepID)
+	}
+}
+
+// Quality differences below the epsilon are noise, not signal, and must not
+// override a real resolution difference.
+func TestTinyQualityDifferenceDoesNotOverrideResolution(t *testing.T) {
+	base := uint64(0x7777777777777777)
+
+	candidates := []Candidate{
+		{PhotoID: "small-hair-better", Hash: base, Width: 640, Height: 480,
+			FileSizeBytes: 100, RelativePath: "a.jpg", QualityScore: qf(0.805)},
+		{PhotoID: "large", Hash: base ^ 0b1, Width: 4000, Height: 3000,
+			FileSizeBytes: 100, RelativePath: "b.jpg", QualityScore: qf(0.800)},
+	}
+
+	groups := GroupSimilar(candidates, 12)
+	if len(groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(groups))
+	}
+	if groups[0].SuggestedKeepID != "large" {
+		t.Errorf("suggested keeping %q; a 0.005 quality difference is below the noise floor "+
+			"and must not outweigh a 10x resolution difference", groups[0].SuggestedKeepID)
+	}
+}
+
+// A clear quality difference above the epsilon must decide.
+func TestClearQualityDifferenceDecides(t *testing.T) {
+	base := uint64(0x9999999999999999)
+
+	candidates := []Candidate{
+		{PhotoID: "good", Hash: base, Width: 640, Height: 480,
+			FileSizeBytes: 100, RelativePath: "a.jpg", QualityScore: qf(0.80)},
+		{PhotoID: "bad", Hash: base ^ 0b1, Width: 4000, Height: 3000,
+			FileSizeBytes: 100, RelativePath: "b.jpg", QualityScore: qf(0.30)},
+	}
+
+	groups := GroupSimilar(candidates, 12)
+	if groups[0].SuggestedKeepID != "good" {
+		t.Errorf("suggested keeping %q, want the measurably better image", groups[0].SuggestedKeepID)
+	}
+}

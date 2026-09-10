@@ -115,7 +115,8 @@ func (s *Store) CountPhotosNeedingPHash(ctx context.Context, libraryID string) (
 // candidate structs, which is a reasonable price for correctness.
 func (s *Store) LoadSimilarityCandidates(ctx context.Context, libraryID string) ([]duplicates.Candidate, error) {
 	const q = `
-		SELECT id, phash, COALESCE(width, 0), COALESCE(height, 0), file_size_bytes, relative_path
+		SELECT id, phash, COALESCE(width, 0), COALESCE(height, 0), file_size_bytes,
+		       relative_path, quality_score
 		FROM photos
 		WHERE library_id = $1
 		  AND phash IS NOT NULL
@@ -132,7 +133,8 @@ func (s *Store) LoadSimilarityCandidates(ctx context.Context, libraryID string) 
 	for rows.Next() {
 		var c duplicates.Candidate
 		var signed int64
-		if err := rows.Scan(&c.PhotoID, &signed, &c.Width, &c.Height, &c.FileSizeBytes, &c.RelativePath); err != nil {
+		if err := rows.Scan(&c.PhotoID, &signed, &c.Width, &c.Height, &c.FileSizeBytes,
+			&c.RelativePath, &c.QualityScore); err != nil {
 			return nil, fmt.Errorf("store: scanning candidate: %w", err)
 		}
 		c.Hash = uint64(signed)

@@ -564,7 +564,7 @@ func scene(baseSeed int64, id string, w, h int) *image.RGBA {
 			ax:    18 + local.Float64()*37,
 			ay:    18 + local.Float64()*37,
 			phase: local.Float64() * 2 * math.Pi,
-			amp:   6 + local.Float64()*10,
+			amp:   28 + local.Float64()*34,
 		}
 	}
 

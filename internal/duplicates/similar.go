@@ -26,7 +26,20 @@ type Candidate struct {
 	// RelativePath breaks ties between copies that are identical in every
 	// measurable way. See the ranking in buildGroup.
 	RelativePath string
+
+	// QualityScore is the measured quality of the image itself, 0..1, or nil
+	// when the photo has not been analysed. When present it OUTRANKS
+	// resolution and file size -- see buildGroup.
+	QualityScore *float64
 }
+
+// qualityEpsilon is the smallest quality difference treated as meaningful.
+//
+// Two frames from the same burst can differ in the third decimal place for
+// reasons that have nothing to do with which one a person would keep. Below
+// this, the comparison falls through to resolution and file size, which are at
+// least deterministic properties of the file.
+const qualityEpsilon = 0.02
 
 // pathDepth counts directory separators, so a file nearer the library root
 // sorts ahead of one buried in a backup folder.
@@ -148,12 +161,33 @@ func buildGroup(candidates []Candidate, idxs []int) Group {
 	// and the only question is which path to keep -- near-duplicates genuinely
 	// differ, so this is a choice about which IMAGE is better:
 	//
-	//   1. Resolution. More pixels is more information, and downscaling is
+	//   1. Measured quality, when BOTH candidates have been analysed AND their
+	//      resolutions are comparable. This describes the image; resolution and
+	//      byte count only describe its container. A sharp 8MP frame genuinely
+	//      beats a blurred 12MP one, and the earlier ranking could not tell.
+	//
+	//      Three guards, each earned:
+	//
+	//      Both sides measured -- otherwise the ranking turns on whether
+	//      analysis happened to have run yet rather than on the photos.
+	//
+	//      Difference above an epsilon -- two frames from the same burst can
+	//      differ in the third decimal for no meaningful reason.
+	//
+	//      (A third guard briefly lived here, restricting quality comparisons
+	//      to photos of similar resolution. It existed because sharpness was
+	//      being measured on a denser grid for small images, so a thumbnail
+	//      measured sharper than its own source. That was a defect in the
+	//      measurement, not a fact about images, and it is fixed in
+	//      internal/quality by scaling every image to a common size. Guarding
+	//      here would have papered over it -- and would have kept a blurred
+	//      12MP frame over a sharp 3MP one, which is exactly backwards.)
+	//   2. Resolution. More pixels is more information, and downscaling is
 	//      lossy in a way that cannot be undone.
-	//   2. File size at equal resolution, as a proxy for compression quality.
+	//   3. File size at equal resolution, as a proxy for compression quality.
 	//      A 40-quality JPEG and a 92-quality JPEG of the same scene have the
 	//      same dimensions; the larger file kept more detail.
-	//   3. Path shape -- shallowest directory, then shortest name. This only
+	//   4. Path shape -- shallowest directory, then shortest name. This only
 	//      matters when the copies are byte-identical, which happens because
 	//      an exact duplicate is also a near-duplicate at distance 0. Without
 	//      it the tiebreak fell through to a UUID, and this view would suggest
@@ -161,18 +195,22 @@ func buildGroup(candidates []Candidate, idxs []int) Group {
 	//      "scene17.jpg" -- two features disagreeing about the same files, with
 	//      the arbitrary answer coming from here. Matching Phase 4's heuristic
 	//      makes them agree and picks the copy that looks like the original.
-	//   4. Photo id, so the ordering is total and a rerun over unchanged data
+	//   5. Photo id, so the ordering is total and a rerun over unchanged data
 	//      produces the same suggestion.
 	//
-	// PHASE 7 WILL SUPERSEDE STEPS 1-2 for photos that have quality metrics:
-	// sharpness and exposure describe the image itself, where resolution and
-	// byte count only describe its container. A sharp 8MP frame beats a
-	// blurred 12MP one, and this ranking cannot currently tell.
 	sorted := make([]int, len(idxs))
 	copy(sorted, idxs)
 
 	sort.Slice(sorted, func(a, b int) bool {
 		ca, cb := candidates[sorted[a]], candidates[sorted[b]]
+
+		if ca.QualityScore != nil && cb.QualityScore != nil {
+			qa, qb := *ca.QualityScore, *cb.QualityScore
+			if diff := qa - qb; diff > qualityEpsilon || diff < -qualityEpsilon {
+				return qa > qb
+			}
+		}
+
 		if ca.Pixels() != cb.Pixels() {
 			return ca.Pixels() > cb.Pixels()
 		}

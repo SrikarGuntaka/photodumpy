@@ -122,7 +122,7 @@ PhotoKit local identifier instead of a path. Everything downstream operates on
 rows and on an `io.Reader`, never on `os.Open(absolutePath)`, so the swap is one
 interface implementation rather than a rewrite.
 
-## 3. Job execution **(planned — Phase 5)**
+## 3. Job execution **(implemented — Phase 5)**
 
 ### State machine
 
@@ -181,7 +181,7 @@ Base 2s, cap 5m. The jitter matters because a Postgres restart fails every
 in-flight job at the same instant; without it they would all retry together and
 do it again.
 
-## 4. Worker lifecycle **(planned — Phase 5)**
+## 4. Worker lifecycle **(implemented — Phase 5)**
 
 ```
 start
@@ -271,9 +271,9 @@ The semaphore slot is acquired *before* the goroutine is spawned, so the number
 of live goroutines is capped rather than merely their throughput. Batching the
 row claim keeps memory independent of library size.
 
-`ExtractOne` is a standalone method precisely so Phase 5's `EXTRACT_METADATA`
-handler can call it unchanged; the queue then supplies the leases, retries and
-crash recovery that the local loop provides today.
+`ExtractOne` is a standalone method precisely so the `EXTRACT_METADATA`
+handler can call it unchanged, which is what it now does; the queue supplies
+the leases, retries and crash recovery that the local loop provided before.
 
 Failure handling separates three cases that look alike:
 
@@ -290,11 +290,11 @@ otherwise the processor would retry the same corrupt file forever.
 
 | Job | Phase | Writes |
 |-----|-------|--------|
-| `EXTRACT_METADATA` | 3 | dimensions, capture time, GPS, format *(implemented; runs in-process until Phase 5)* |
+| `EXTRACT_METADATA` | 3 | dimensions, capture time, GPS, format *(implemented)* |
 | `COMPUTE_FILE_HASH` | 4 | `sha256` (streamed, never fully buffered) *(implemented)* |
-| `GENERATE_THUMBNAIL` | 6 | `thumbnail_path` |
-| `COMPUTE_PERCEPTUAL_HASH` | 6 | `phash` |
-| `ANALYZE_QUALITY` | 7 | sharpness, exposure, contrast, quality score |
+| `GENERATE_THUMBNAIL` | 6 | `thumbnail_path` *(not implemented; deferred to the frontend phase)* |
+| `COMPUTE_PERCEPTUAL_HASH` | 6 | `phash` *(implemented)* |
+| `ANALYZE_QUALITY` | 7 | sharpness, exposure, contrast, resolution, quality score, flags *(implemented)* |
 
 Each is a deterministic function of file bytes whose completion is an
 `UPDATE photos SET ... WHERE id = $1`. Running one twice writes identical

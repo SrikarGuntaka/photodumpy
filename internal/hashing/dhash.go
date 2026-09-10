@@ -125,21 +125,30 @@ func Similar(a, b uint64, threshold int) bool {
 // DefaultSimilarityThreshold is the default Hamming distance below which two
 // photos are considered near-duplicates.
 //
-// Calibration, on a 64-bit hash:
+// MEASURED, not guessed. On the fixture corpus
+// (TestCalibrateSimilarityGap):
 //
-//	0      byte-identical or visually indistinguishable
-//	1-6    the same photo, recompressed or resized
-//	7-12   the same scene: burst frames, minor edits, small crops
-//	13-20  related but distinguishable; a lot of false positives here
-//	21+    unrelated (random pairs average ~32, half the bits)
+//	near-duplicate pairs   0 .. 9
+//	unrelated pairs       17 .. 38
+//	usable gap             9 .. 17
 //
-// 10 sits inside the "same scene" band. Erring low is deliberate: a missed
-// near-duplicate costs the user some disk space, while a false positive puts
-// two unrelated photos in a group and invites deleting one of them.
+// 12 sits inside that gap with 3 bits of margin above the widest genuine
+// near-duplicate and 5 below the closest unrelated pair. An earlier value of
+// 10 also passed, but with only 1 bit of headroom -- it worked by luck rather
+// than by margin.
 //
-// Configurable via SIMILARITY_THRESHOLD, and the API exposes the raw distance
-// so a user can see exactly how close a pair was.
-const DefaultSimilarityThreshold = 10
+// Erring BELOW the gap's midpoint (13) is deliberate. The two error modes are
+// not symmetric: a missed near-duplicate costs the user some disk space, while
+// a false positive puts two unrelated photos in one group and invites deleting
+// a photo that was never a duplicate.
+//
+// THE HONEST CAVEAT: this is calibrated on synthetic images. Real photographs
+// -- especially flat scenes, night shots and heavily edited frames -- may
+// distribute differently, and the threshold should be re-measured against a
+// real library before anyone relies on the default. That is what
+// SIMILARITY_THRESHOLD is for, and why the API exposes raw distances rather
+// than only a yes/no.
+const DefaultSimilarityThreshold = 12
 
 // MaxSimilarityThreshold caps configuration. Beyond this the results are noise:
 // random unrelated hashes differ by ~32 bits, so a threshold near that groups

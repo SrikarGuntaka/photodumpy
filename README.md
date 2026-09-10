@@ -22,10 +22,10 @@ Built in phases, each independently runnable and testable.
 | 2 | Local folder ingestion (`scan`) | **Done** |
 | 3 | Metadata extraction (EXIF, GPS, dimensions) | **Done** |
 | 4 | Exact duplicate detection (SHA-256) | **Done** |
-| 5 | Distributed job queue: leases, retries, crash recovery | Next |
+| 5 | Distributed job queue: leases, retries, crash recovery | **Done** |
 | 6 | Near-duplicate detection (perceptual hashing) | **Done** |
-| 7 | Quality analysis (sharpness, exposure, contrast) | Next |
-| 8 | Time + location clustering | Planned |
+| 7 | Quality analysis (sharpness, exposure, contrast) | **Done** |
+| 8 | Time + location clustering | Next |
 | 9 | Full read API | Planned |
 | 10 | React frontend | Planned |
 | 11 | Benchmarks and polish | Planned |
@@ -217,6 +217,53 @@ makes the suggestion stable across runs.
 
 **Nothing is deleted.** There is no delete path in this application. The output
 is a list for you to act on yourself.
+
+## Quality analysis
+
+```bash
+docker compose exec api photo-organizer quality <library-id>
+```
+
+```
+Analyzed           42
+Flagged            12
+Mean score         0.51
+
+  low_resolution             3
+  possibly_blurry            3
+  possibly_overexposed       3
+  possibly_underexposed      3
+  shadows_clipped            1
+
+SCORE   SHARP   EXPOS   DIMS       FLAGS                          PATH
+0.26    0.20    0.42    640x480    underexposed                   scene12-dark.jpg
+0.37    0.02    1.00    640x480    blurry                         trip/scene19-blurry.jpg
+0.40    0.39    0.55    640x480    underexposed,shadows_clipped   screenshots/scene04-dark.jpg
+```
+
+Four measurements, each on 0..1, combined into an overall score by weighted
+mean — sharpness 0.45, exposure 0.30, contrast 0.15, resolution 0.10:
+
+- **Sharpness** — variance of the Laplacian, the standard focus metric.
+- **Exposure** — mean luminance plus the fraction of pixels clipped to pure
+  black or pure white.
+- **Contrast** — standard deviation of the luminance histogram.
+- **Resolution** — pixel count against a 2 MP reference.
+
+Every image is first scaled to a 512px long edge, *including images already
+smaller than that*. Laplacian variance measures detail **density**, so
+measuring a thumbnail at its native size inflates it enormously — a 160×120
+crop once scored 37× the 640×480 original it came from, and the near-duplicate
+ranker duly recommended keeping the thumbnail. Filter `--flag` to one flag,
+e.g. `-flag possibly_blurry`.
+
+**These are measurements of pixels, not judgements of merit.** A shallow
+depth-of-field portrait is genuinely blurry by Laplacian variance and may be
+the best photograph in the library; motion blur is sometimes the entire point.
+That is why every flag is hedged in its own name (`possibly_blurry`, never
+`blurry`) and why the raw measurements are stored and displayed alongside the
+scores — so you can disagree with a threshold rather than be handed a verdict.
+No generative model is involved in deciding any of this, by design.
 
 ## Testing
 
