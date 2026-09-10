@@ -504,3 +504,113 @@ and night shots, will sit differently. That is why the thresholds are
 configuration rather than constants, and why `raw_laplacian_variance` is stored
 alongside the normalised score — a future recalibration is then a SQL update
 rather than a re-decode of the whole library.
+
+---
+
+## 18. Events are segmented in one ordered pass, not clustered in a metric space
+
+The obvious move for "group photos by time and place" is to reach for a
+general-purpose clusterer — k-means, or DBSCAN over a combined time/space
+metric. Both were rejected for the same reason: they need a single distance
+between two photos, and computing one requires an exchange rate between *an
+hour* and *a kilometre*.
+
+There is no honest such number. Whatever constant is chosen is a fabricated
+parameter with no units and no way to calibrate it, and it silently decides
+every boundary in the library. So the two dimensions stay separate, each with
+its own threshold in its own units, and the algorithm is a single ordered pass
+that cuts between consecutive photos when either test fails. It is also
+O(n log n) dominated by the sort, against DBSCAN's O(n²) without a spatial
+index.
+
+k-means fails on a second count anyway: it needs *k* up front. Nobody knows how
+many events are in a folder — that is the question being asked.
+
+### The two tests are asymmetric, deliberately
+
+**Time is measured between consecutive photos.** A four-hour gap is what a
+break in shooting looks like. Measuring from the cluster's start instead would
+guillotine a wedding photographed steadily for nine hours at the four-hour
+mark, which is why `TestSteadyShootingIsOneEvent` exists.
+
+**Distance is measured from the cluster's anchor** — its first GPS fix — not
+from the previous photo. Consecutive-pair comparison permits unbounded drift: a
+photo every 200m along a coast road never exceeds a 1500m threshold, so fifty
+kilometres of coastline becomes one "place". Anchoring bounds a cluster's
+radius by construction.
+
+The cost is real and worth naming: membership depends on which photo came
+first, and a genuine walking tour is cut into segments. That is the better
+failure. Several clusters a person can merge by eye beats one that silently
+spans a county.
+
+### Missing GPS is the common case, not an error path
+
+Most photos have no GPS. A photo without coordinates joins the cluster its
+timestamp puts it in and simply does not participate in the distance test — it
+must never split an event and must never be excluded from one. A cluster that
+starts with unlocated photos adopts the first fix it sees as its anchor, and
+keeps the members that joined before it; they joined on time, which is still
+true.
+
+Per-member distance is stored NULL when the photo has no fix, never 0. "No fix"
+and "at the anchor" are different facts, and conflating them would put every
+unlocated photo at the centre of the map.
+
+### Haversine, and why not the alternatives
+
+| formula | rejected because |
+|---------|------------------|
+| equirectangular | faster, degrades badly near the poles |
+| spherical law of cosines | algebraically equivalent, loses precision catastrophically for *nearby* points — the case that dominates here |
+| Vincenty | more accurate on the ellipsoid, but iterative and famously fails to converge for near-antipodal points |
+
+Haversine is exact for the spherical model at every separation and stable at
+short range. It is written as `atan2(sqrt(a), sqrt(1-a))` rather than
+`asin(sqrt(a))`: the two agree in exact arithmetic, but rounding can push `a` a
+hair above 1 for antipodal points, and `asin(>1)` is NaN while `atan2` stays
+well defined. Longitude wraparound needs no special handling, because
+`sin((l2-l1)/2)` is periodic — a pair straddling the antimeridian at +179.9 and
+−179.9 gives the correct 22km rather than 40,000km.
+
+A single Earth radius is an approximation — the spheroid means up to ~0.5%
+error against WGS-84. At the scale that decides whether two photos are within a
+kilometre, that is metres, far inside consumer GPS error.
+
+There is exactly ONE implementation of it. An early draft computed member
+distances a second time in SQL, with a comment claiming this avoided drift; it
+does the opposite. The SQL version would also have had to be the `asin` form,
+losing precision at exactly the short ranges this feature works at.
+
+### Clusters built from mtimes are labelled, not hidden
+
+A photo with no EXIF date falls back to filesystem mtime. A cluster built
+entirely from mtimes is a statement about when *files were written*, not when
+photographs were taken — and copying a folder stamps every file within a second
+or two, which collapses a whole library into one enormous "event".
+
+Rather than suppress those, each cluster counts how many members were dated by
+a camera and reports `confidence` as high, mixed or low. On the fixture corpus
+this correctly labels the seven no-EXIF files, all stamped within one second of
+each other at generation time, as a single low-confidence event.
+
+### Rebuild whole, not incrementally
+
+A single new photo can legitimately MERGE two existing events — one taken in
+the gap between them joins both into one. An incremental path would have to
+handle merges, splits and re-anchoring. Full rebuild is a few milliseconds at
+this scale and is idempotent by construction: re-running produces a
+byte-identical fingerprint, which is asserted end to end.
+
+### A bug worth recording
+
+`RebuildClusters` stores the thresholds each cluster was built with, so the
+grouping stays interpretable later. The first version stored the *requested*
+options rather than the *effective* ones — defaults were applied inside
+`Segment`, so a caller passing a zero value had "built with a maximum gap of
+zero seconds" written to every row.
+
+It was caught by the `max_gap_seconds > 0` CHECK constraint, which is the right
+place for it to be caught and the wrong place to be relying on. The fix
+exports `Options.WithDefaults()` and resolves once, at construction, so the
+values logged and the values stored are the values applied.

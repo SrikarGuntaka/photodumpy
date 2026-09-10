@@ -161,6 +161,13 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clusters, err := s.store.SummariseClusters(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("summarising clusters", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to summarise")
+		return
+	}
+
 	resp := newLibraryResponse(lib, &count)
 	writeJSON(w, log, http.StatusOK, map[string]any{
 		"library":         resp,
@@ -169,6 +176,7 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		"duplicates":      dupes,
 		"similar":         similar,
 		"quality":         qual,
+		"clusters":        clusters,
 		// Whether THIS process is scanning/extracting. Distinct from
 		// scan_state, which is what the database believes -- if they disagree
 		// after a crash, that is worth being able to see.
@@ -611,5 +619,40 @@ func (s *Server) handleListQuality(w http.ResponseWriter, r *http.Request) {
 		"note": "these are objective measurements, not judgements of photographic merit. " +
 			"a shallow depth-of-field portrait is genuinely blurry by Laplacian variance and " +
 			"may be the best photo in the library. nothing is or will be deleted.",
+	})
+}
+
+// handleListClusters returns a library's event timeline.
+func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
+	log := loggerFrom(r.Context(), s.log)
+
+	lib, ok := s.lookupLibrary(w, r)
+	if !ok {
+		return
+	}
+
+	q := r.URL.Query()
+	clusters, err := s.store.ListClusters(r.Context(), lib.ID,
+		atoiDefault(q.Get("limit"), 50), atoiDefault(q.Get("offset"), 0))
+	if err != nil {
+		log.Error("listing clusters", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to list clusters")
+		return
+	}
+
+	summary, err := s.store.SummariseClusters(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("summarising clusters", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to summarise")
+		return
+	}
+
+	writeJSON(w, log, http.StatusOK, map[string]any{
+		"clusters": clusters,
+		"summary":  summary,
+		"note": "events are grouped by capture time and, where present, GPS. photos without " +
+			"GPS join on time alone; photos with no timestamp at all are not clustered and " +
+			"are counted as undated. confidence is low when every member was dated from a " +
+			"filesystem mtime rather than a camera timestamp",
 	})
 }

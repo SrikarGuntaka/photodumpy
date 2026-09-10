@@ -9,6 +9,12 @@ x-app-env: &app-env
   LOG_LEVEL: ${LOG_LEVEL:-info}
   PHOTO_ROOT: /photos
   THUMBNAIL_DIR: /var/lib/photo-organizer/thumbnails
+  # Detection thresholds. Every one is a judgement call rather than a constant
+  # of nature, so all are overridable; empty means "use the calibrated default"
+  # rather than zero. See DESIGN_DECISIONS.md for how each was arrived at.
+  SIMILARITY_THRESHOLD: ${SIMILARITY_THRESHOLD:-}
+  CLUSTER_MAX_GAP: ${CLUSTER_MAX_GAP:-}
+  CLUSTER_MAX_RADIUS_METERS: ${CLUSTER_MAX_RADIUS_METERS:-}
 
 services:
   postgres:

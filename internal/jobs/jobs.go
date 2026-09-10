@@ -29,6 +29,7 @@ const (
 	// Aggregate stages. One per library, needing a global view.
 	TypeBuildDuplicateGroups Type = "BUILD_DUPLICATE_GROUPS"
 	TypeBuildSimilarGroups   Type = "BUILD_SIMILAR_GROUPS"
+	TypeBuildClusters        Type = "BUILD_CLUSTERS"
 )
 
 // TargetType distinguishes the two shapes of job.

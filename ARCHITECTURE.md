@@ -305,30 +305,56 @@ values. That is what makes at-least-once delivery safe.
 | Stage | Phase | Why not per-photo |
 |-------|-------|-------------------|
 | `BUILD_DUPLICATE_GROUPS` | 4 | Needs a global `GROUP BY sha256`; sharding means merging partial groups *(implemented)* |
-| `BUILD_PHOTO_CLUSTERS` | 8 | Inherently sequential — a cluster boundary depends on neighbouring photos |
-| `RANK_SIMILAR_PHOTOS` | 6 | Operates on already-formed groups |
+| `BUILD_CLUSTERS` | 8 | Inherently sequential — a cluster boundary depends on neighbouring photos *(implemented)* |
+| `BUILD_SIMILAR_GROUPS` | 6 | Grouping is transitive; needs every hash at once *(implemented)* |
 
 These are still ordinary rows in the same queue, with the same leases, retries
 and crash recovery — just `target_type = 'library'`. They achieve idempotency by
 rebuilding their output for the library inside one transaction
 (`DELETE WHERE library_id = $1`, then insert).
 
-## 7. Clustering **(planned — Phase 8)**
+## 7. Clustering **(implemented — Phase 8)**
 
 Sort by capture time, sweep, and cut a boundary when either:
 
-- the time gap to the previous photo exceeds `CLUSTER_TIME_GAP` (default 4h), or
-- the Haversine distance exceeds `CLUSTER_DISTANCE_KM` (default 25km)
+- the time gap **to the previous photo** exceeds `CLUSTER_MAX_GAP` (default 4h), or
+- the Haversine distance **from the cluster's first GPS fix** exceeds
+  `CLUSTER_MAX_RADIUS_METERS` (default 1500m)
 
-Both thresholds are configurable.
+Both thresholds are configurable. The asymmetry between them is deliberate and
+is explained in [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) §18: time is
+inherently a gap between neighbours, while anchoring the distance is what stops
+small steps chaining into a cluster that spans a county.
+
+Two details differ from the original sketch, and the sketch was wrong:
+
+- The distance threshold is **1500m, not 25km**. 25km would place two different
+  towns in one event. 1500m is roughly a fifteen-minute walk — wide enough that
+  consumer GPS error never splits anything, narrow enough to separate two stops
+  on the same trip.
+- The default is expressed in **metres, not kilometres**, because the values
+  that matter are all under a kilometre.
 
 **Photos without GPS** — a large fraction of any real library — are clustered on
-time alone and inherit a location from temporally adjacent photos that do have
-one, but only when those neighbours agree with each other. Where they do not,
-the cluster is left without a location rather than guessing.
+time alone. They join the event their timestamp puts them in and take no part in
+the distance test.
 
-**Photos without any timestamp** (no EXIF, unusable mtime) go into a dedicated
-"undated" bucket rather than being forced into a chronology they would corrupt.
+They do **not** inherit a location from their neighbours. The original sketch
+proposed that; it is deliberately not implemented. Inheriting would mean
+recording where a photo was taken when the camera never recorded it, in a column
+indistinguishable from a real fix. The cluster's own anchor already lets the UI
+say "this event was around here" without making a claim about any individual
+photo. Per-member distance is `NULL` for an unlocated photo, never `0`.
+
+**Photos without any timestamp** (no EXIF, unusable mtime) are not clustered and
+not dropped. They are counted as `undated`, so the totals reconcile exactly:
+clustered + undated + missing/failed = every photo in the library.
+
+**Clusters dated from mtimes are labelled.** Each cluster counts how many members
+came from a camera timestamp rather than a filesystem mtime and reports
+`confidence` as high, mixed or low — because a folder copy stamps every file
+within a second or two, which would otherwise present a whole library as one
+confident "event".
 
 ## 8. Failure behaviour
 
@@ -341,7 +367,7 @@ the cluster is left without a location rather than guessing.
 | Malformed image | Job fails permanently after `max_attempts`; photo marked `failed` with the reason. Other photos are unaffected. |
 | Corrupt or absent EXIF | Not an error. `captured_at` falls back to filesystem mtime, recorded via `captured_at_source`. |
 | Missing GPS | Not an error. Latitude/longitude stay `NULL` — never `(0,0)`, which is a real location. |
-| Missing timestamp | Photo is excluded from chronological clustering and placed in the undated bucket. |
+| Missing timestamp | Photo is excluded from chronological clustering and counted as `undated`. Not dropped -- the totals reconcile. |
 | Duplicate job execution | Safe by construction — see idempotency above. |
 | File deleted after scan | Photo marked `missing`, job **succeeds**. A deleted file is not a retryable condition, and retrying it five times is waste. |
 | File unreadable (permissions) | Retried — this *is* transient. Marked `failed` after `max_attempts`. |

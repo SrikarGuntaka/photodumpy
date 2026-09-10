@@ -25,8 +25,8 @@ Built in phases, each independently runnable and testable.
 | 5 | Distributed job queue: leases, retries, crash recovery | **Done** |
 | 6 | Near-duplicate detection (perceptual hashing) | **Done** |
 | 7 | Quality analysis (sharpness, exposure, contrast) | **Done** |
-| 8 | Time + location clustering | Next |
-| 9 | Full read API | Planned |
+| 8 | Time + location clustering | **Done** |
+| 9 | Full read API | Next |
 | 10 | React frontend | Planned |
 | 11 | Benchmarks and polish | Planned |
 
@@ -87,6 +87,8 @@ The API is on <http://localhost:8080>:
 | `POST /api/libraries/{id}/hash` | Compute SHA-256 and rebuild duplicate groups. Returns 202. |
 | `GET /api/libraries/{id}/duplicates` | Exact-duplicate groups, biggest saving first. |
 | `GET /api/libraries/{id}/similar` | Near-duplicate groups with per-photo distances. |
+| `GET /api/libraries/{id}/quality` | Photos carrying a quality flag, worst first. |
+| `GET /api/libraries/{id}/clusters` | Event timeline grouped by time and location. |
 | `GET /api/libraries/{id}/photos` | Paginated photo list with metadata. |
 
 ## Scanning a folder
@@ -264,6 +266,58 @@ That is why every flag is hedged in its own name (`possibly_blurry`, never
 `blurry`) and why the raw measurements are stored and displayed alongside the
 scores — so you can disagree with a threshold rather than be handed a verdict.
 No generative model is involved in deciding any of this, by design.
+
+## Grouping into events
+
+```bash
+docker compose exec api photo-organizer clusters <library-id>
+```
+
+```
+Events             5
+Photos placed      40
+With GPS           24
+Largest event      16 photos
+Low confidence     1  (dated from file mtimes, not the camera)
+
+Event 3  2026-03-14 22:19  (4h42m)  8 photos
+         32.7767, -96.7970  (7 of 8 located)
+    -- 2026-03-14 --
+  22:19:00      0m  misc/nested/deep/scene17.jpg
+  23:06:00      0m  scene18.jpg
+  23:53:00      0m  trip/scene19-blurry.jpg
+    -- 2026-03-15 --
+  03:01:00       -  misc/nested/deep/scene23-nogps.jpg
+```
+
+A single ordered pass cuts between consecutive photos when either test fails:
+more than `CLUSTER_MAX_GAP` (default 4h) of silence, or further than
+`CLUSTER_MAX_RADIUS_METERS` (default 1500m) from the event's first GPS fix.
+
+The two thresholds stay separate rather than being fed to a general-purpose
+clusterer, because combining them into one distance would require an exchange
+rate between "one hour" and "one kilometre", and there is no honest such number.
+
+**GPS is optional, and its absence never splits an event.** A photo with no
+coordinates joins on time alone — it simply does not take part in the distance
+test. In the run above, the split between the Austin and Dallas events was made
+by *distance*: the gap between them is 1h34m, well inside the 4-hour threshold,
+but they are 293km apart.
+
+**Distance is measured from the event's first fix, not the previous photo.**
+Comparing consecutive photos permits unbounded drift — a picture every 200m
+along a coast road never exceeds the threshold, so fifty kilometres becomes one
+"place". Anchoring bounds an event's radius by construction. The trade is that a
+genuine walking tour gets cut into segments, which is the better failure.
+
+**Photos with no timestamp are not clustered, and not hidden.** They are
+counted as `undated`. The numbers reconcile exactly: clustered + undated +
+missing/failed = every photo in the library.
+
+**Events built from filesystem mtimes are labelled low confidence.** Copying a
+folder stamps every file within a second or two, which would otherwise collapse
+a library into one enormous, confident-looking "event" — visible as Event 1 in
+the sample above.
 
 ## Testing
 

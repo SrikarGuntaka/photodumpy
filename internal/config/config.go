@@ -61,6 +61,14 @@ type Config struct {
 	// as near-duplicates. Zero means the calibrated default.
 	SimilarityThreshold int
 
+	// ClusterMaxGap is the silence between consecutive photos that ends an
+	// event. Zero means the calibrated default.
+	ClusterMaxGap time.Duration
+
+	// ClusterMaxRadiusMeters is how far a photo may sit from its event's
+	// anchor before it starts a new event. Zero means the calibrated default.
+	ClusterMaxRadiusMeters float64
+
 	// APIBaseURL is used by the CLI to reach the API.
 	APIBaseURL string
 }
@@ -69,17 +77,19 @@ type Config struct {
 func Load() (*Config, error) {
 	l := &loader{}
 	cfg := &Config{
-		Env:                 l.String("ENV", "development"),
-		DatabaseURL:         l.String("DATABASE_URL", ""),
-		DBMaxConns:          int32(l.Int("DB_MAX_CONNS", 10)),
-		DBConnectTimeout:    l.Duration("DB_CONNECT_TIMEOUT", 30*time.Second),
-		HTTPAddr:            l.String("HTTP_ADDR", ":8080"),
-		ShutdownGrace:       l.Duration("SHUTDOWN_GRACE", 30*time.Second),
-		PhotoRoot:           l.String("PHOTO_ROOT", "/photos"),
-		ThumbnailDir:        l.String("THUMBNAIL_DIR", "/var/lib/photo-organizer/thumbnails"),
-		ProcessConcurrency:  l.Int("PROCESS_CONCURRENCY", 0),
-		SimilarityThreshold: l.Int("SIMILARITY_THRESHOLD", 0),
-		APIBaseURL:          l.String("API_BASE_URL", "http://localhost:8080"),
+		Env:                    l.String("ENV", "development"),
+		DatabaseURL:            l.String("DATABASE_URL", ""),
+		DBMaxConns:             int32(l.Int("DB_MAX_CONNS", 10)),
+		DBConnectTimeout:       l.Duration("DB_CONNECT_TIMEOUT", 30*time.Second),
+		HTTPAddr:               l.String("HTTP_ADDR", ":8080"),
+		ShutdownGrace:          l.Duration("SHUTDOWN_GRACE", 30*time.Second),
+		PhotoRoot:              l.String("PHOTO_ROOT", "/photos"),
+		ThumbnailDir:           l.String("THUMBNAIL_DIR", "/var/lib/photo-organizer/thumbnails"),
+		ProcessConcurrency:     l.Int("PROCESS_CONCURRENCY", 0),
+		SimilarityThreshold:    l.Int("SIMILARITY_THRESHOLD", 0),
+		ClusterMaxGap:          l.Duration("CLUSTER_MAX_GAP", 0),
+		ClusterMaxRadiusMeters: l.Float("CLUSTER_MAX_RADIUS_METERS", 0),
+		APIBaseURL:             l.String("API_BASE_URL", "http://localhost:8080"),
 	}
 
 	lvl, err := parseLevel(l.String("LOG_LEVEL", "info"))
@@ -99,6 +109,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.SimilarityThreshold < 0 {
 		l.errs = append(l.errs, fmt.Errorf("config: SIMILARITY_THRESHOLD must be >= 0, got %d", cfg.SimilarityThreshold))
+	}
+	if cfg.ClusterMaxGap < 0 {
+		l.errs = append(l.errs, fmt.Errorf("config: CLUSTER_MAX_GAP must be >= 0, got %s", cfg.ClusterMaxGap))
+	}
+	if cfg.ClusterMaxRadiusMeters < 0 {
+		l.errs = append(l.errs, fmt.Errorf("config: CLUSTER_MAX_RADIUS_METERS must be >= 0, got %v", cfg.ClusterMaxRadiusMeters))
 	}
 	if cfg.ProcessConcurrency < 0 {
 		l.errs = append(l.errs, fmt.Errorf("config: PROCESS_CONCURRENCY must be >= 0, got %d", cfg.ProcessConcurrency))
@@ -179,6 +195,19 @@ func (l *loader) Int(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func (l *loader) Float(key string, def float64) float64 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		l.errs = append(l.errs, fmt.Errorf("config: %s=%q is not a number", key, v))
+		return def
+	}
+	return f
 }
 
 func (l *loader) Duration(key string, def time.Duration) time.Duration {

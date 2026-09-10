@@ -295,6 +295,7 @@ func (s *Scanner) EnqueuePhotoJobs(ctx context.Context, libraryID string) (int, 
 	n, err := s.store.EnqueueJobs(ctx, []jobs.Enqueue{
 		jobs.NewLibraryJob(jobs.TypeBuildDuplicateGroups, libraryID),
 		jobs.NewLibraryJob(jobs.TypeBuildSimilarGroups, libraryID),
+		jobs.NewLibraryJob(jobs.TypeBuildClusters, libraryID),
 	})
 	if err != nil {
 		return total, err

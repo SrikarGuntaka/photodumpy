@@ -70,7 +70,11 @@ func run() error {
 		Concurrency:   concurrency,
 		ShutdownGrace: cfg.ShutdownGrace,
 	})
-	worker.NewHandlers(st, processor, log, cfg.SimilarityThreshold).RegisterAll(w)
+	worker.NewHandlers(st, processor, log, worker.Tuning{
+		SimilarityThreshold: cfg.SimilarityThreshold,
+		MaxGap:              cfg.ClusterMaxGap,
+		MaxRadiusMeters:     cfg.ClusterMaxRadiusMeters,
+	}).RegisterAll(w)
 
 	return w.Run(ctx)
 }

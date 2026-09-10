@@ -37,6 +37,7 @@ Commands:
   duplicates <lib-id>    Show exact-duplicate groups (suggestions only)
   similar <library-id>   Show near-duplicate groups (suggestions only)
   quality <library-id>   Show photos with technical defects (measurements only)
+  clusters <lib-id>      Show the event timeline (time + location grouping)
   queue <library-id>     Enqueue the pipeline as jobs for the worker pool
   jobs <library-id>      Show queue state
   workers                Show the worker fleet
@@ -145,6 +146,11 @@ func run(args []string, out io.Writer) error {
 			return errors.New("quality requires a library id: photo-organizer quality <library-id>")
 		}
 		return cmdQuality(ctx, c, out, rest[0], *flag, *limit, *offset)
+	case "clusters":
+		if len(rest) < 1 {
+			return errors.New("clusters requires a library id: photo-organizer clusters <library-id>")
+		}
+		return cmdClusters(ctx, c, out, rest[0], *limit, *offset)
 	case "queue":
 		if len(rest) < 1 {
 			return errors.New("queue requires a library id: photo-organizer queue <library-id>")
@@ -796,6 +802,163 @@ func cmdSimilar(ctx context.Context, c *client, out io.Writer, libraryID string,
 	fmt.Fprintln(out, "These are suggestions. No files have been modified, moved or deleted.")
 	fmt.Fprintln(out, "dist = Hamming distance from the KEEP photo, out of 64 bits.")
 	fmt.Fprintln(out, "KEEP prefers higher resolution, then a larger file at equal resolution.")
+	return nil
+}
+
+type clusterMember struct {
+	PhotoID        string   `json:"photo_id"`
+	RelativePath   string   `json:"relative_path"`
+	Sequence       int      `json:"sequence"`
+	CapturedAt     *string  `json:"captured_at"`
+	DistanceMeters *float64 `json:"distance_meters"`
+}
+
+type clusterGroup struct {
+	ID                   string          `json:"id"`
+	PhotoCount           int             `json:"photo_count"`
+	StartedAt            string          `json:"started_at"`
+	EndedAt              string          `json:"ended_at"`
+	AnchorLatitude       *float64        `json:"anchor_latitude"`
+	AnchorLongitude      *float64        `json:"anchor_longitude"`
+	MaxDistanceMeters    float64         `json:"max_distance_meters"`
+	LocatedCount         int             `json:"located_count"`
+	FilesystemDatedCount int             `json:"filesystem_dated_count"`
+	Confidence           string          `json:"confidence"`
+	Photos               []clusterMember `json:"photos"`
+}
+
+type clusterSummary struct {
+	Clusters          int `json:"clusters"`
+	Clustered         int `json:"clustered_photos"`
+	Undated           int `json:"undated_photos"`
+	Located           int `json:"located_photos"`
+	LowConfidence     int `json:"low_confidence_clusters"`
+	LargestPhotoCount int `json:"largest_cluster_photos"`
+}
+
+type clusterResponse struct {
+	Clusters []clusterGroup `json:"clusters"`
+	Summary  clusterSummary `json:"summary"`
+}
+
+// humanSpan renders an event's duration in the largest unit that stays
+// readable. Seconds for a burst is more honest than "0 hours".
+func humanSpan(start, end time.Time) string {
+	d := end.Sub(start)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd%02dh", int(d.Hours())/24, int(d.Hours())%24)
+	}
+}
+
+// plural renders "1 photo" and "2 photos". Only regular nouns; there is no
+// call for anything cleverer here.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// humanMeters keeps distances readable without implying a precision consumer
+// GPS does not have.
+func humanMeters(m float64) string {
+	if m < 1000 {
+		return fmt.Sprintf("%.0fm", m)
+	}
+	return fmt.Sprintf("%.1fkm", m/1000)
+}
+
+// cmdClusters prints the event timeline.
+func cmdClusters(ctx context.Context, c *client, out io.Writer, libraryID string, limit, offset int) error {
+	var resp clusterResponse
+	url := fmt.Sprintf("/api/libraries/%s/clusters?limit=%d&offset=%d", libraryID, limit, offset)
+	if _, err := c.get(ctx, url, &resp); err != nil {
+		return err
+	}
+
+	s := resp.Summary
+	fmt.Fprintf(out, "Events             %d\n", s.Clusters)
+	fmt.Fprintf(out, "Photos placed      %d\n", s.Clustered)
+	fmt.Fprintf(out, "With GPS           %d\n", s.Located)
+	fmt.Fprintf(out, "Largest event      %d photos\n", s.LargestPhotoCount)
+	if s.Undated > 0 {
+		fmt.Fprintf(out, "Undated            %d  (no timestamp; cannot be placed on a timeline)\n", s.Undated)
+	}
+	if s.LowConfidence > 0 {
+		fmt.Fprintf(out, "Low confidence     %d  (dated from file mtimes, not the camera)\n", s.LowConfidence)
+	}
+	fmt.Fprintln(out)
+
+	if len(resp.Clusters) == 0 {
+		fmt.Fprintf(out, "No events yet. Run:  photo-organizer queue %s -wait\n", libraryID)
+		return nil
+	}
+
+	for i, g := range resp.Clusters {
+		start, errStart := time.Parse(time.RFC3339, g.StartedAt)
+		end, errEnd := time.Parse(time.RFC3339, g.EndedAt)
+
+		when := g.StartedAt
+		if errStart == nil {
+			when = start.Format("2006-01-02 15:04")
+			if errEnd == nil {
+				when += "  (" + humanSpan(start, end) + ")"
+			}
+		}
+
+		where := "no GPS"
+		if g.AnchorLatitude != nil && g.AnchorLongitude != nil {
+			where = fmt.Sprintf("%.4f, %.4f", *g.AnchorLatitude, *g.AnchorLongitude)
+			if g.MaxDistanceMeters > 0 {
+				where += "  spread " + humanMeters(g.MaxDistanceMeters)
+			}
+			if g.LocatedCount < g.PhotoCount {
+				where += fmt.Sprintf("  (%d of %d located)", g.LocatedCount, g.PhotoCount)
+			}
+		}
+
+		confidence := ""
+		if g.Confidence != "high" {
+			confidence = fmt.Sprintf("  [%s confidence]", g.Confidence)
+		}
+
+		fmt.Fprintf(out, "Event %d  %s  %s%s\n", offset+i+1, when, plural(g.PhotoCount, "photo"), confidence)
+		fmt.Fprintf(out, "         %s\n", where)
+
+		// An event can run past midnight -- an evening that ends at 03:00 is
+		// one evening. Printing bare times would make those members read as
+		// out of order, so the date is repeated whenever the day changes.
+		day := ""
+		for _, p := range g.Photos {
+			t := "        "
+			if p.CapturedAt != nil {
+				if ct, err := time.Parse(time.RFC3339, *p.CapturedAt); err == nil {
+					if d := ct.Format("2006-01-02"); d != day {
+						day = d
+						fmt.Fprintf(out, "    -- %s --\n", d)
+					}
+					t = ct.Format("15:04:05")
+				}
+			}
+			dist := "     -"
+			if p.DistanceMeters != nil {
+				dist = fmt.Sprintf("%6s", humanMeters(*p.DistanceMeters))
+			}
+			fmt.Fprintf(out, "  %s  %s  %s\n", t, dist, p.RelativePath)
+		}
+		fmt.Fprintln(out)
+	}
+
+	fmt.Fprintln(out, "Events group photos by capture time, and by location where the camera recorded one.")
+	fmt.Fprintln(out, "Photos without GPS join on time alone; distance is measured from the event's first fix.")
+	fmt.Fprintln(out, "Nothing has been modified, moved or deleted.")
 	return nil
 }
 

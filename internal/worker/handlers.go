@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/srikarguntaka/photo-organizer/internal/clustering"
 	"github.com/srikarguntaka/photo-organizer/internal/hashing"
 	"github.com/srikarguntaka/photo-organizer/internal/ingest"
 	"github.com/srikarguntaka/photo-organizer/internal/jobs"
@@ -31,20 +32,47 @@ type Handlers struct {
 	// not a constant of nature -- see hashing.DefaultSimilarityThreshold for
 	// the calibration behind the default.
 	similarityThreshold int
+
+	// clustering holds the time and distance thresholds that decide where one
+	// event ends and the next begins. Judgement calls for the same reason.
+	clustering clustering.Options
 }
 
-func NewHandlers(st *store.Store, processor *ingest.Processor, log *slog.Logger, similarityThreshold int) *Handlers {
-	if similarityThreshold <= 0 {
-		similarityThreshold = hashing.DefaultSimilarityThreshold
+// Tuning collects the thresholds the handlers need.
+//
+// A struct rather than positional parameters because every field is a
+// judgement call that may be revised, and a growing list of bare ints at a
+// call site is how the wrong one ends up in the wrong slot.
+type Tuning struct {
+	SimilarityThreshold int
+	MaxGap              time.Duration
+	MaxRadiusMeters     float64
+}
+
+func NewHandlers(st *store.Store, processor *ingest.Processor, log *slog.Logger, t Tuning) *Handlers {
+	threshold := t.SimilarityThreshold
+	if threshold <= 0 {
+		threshold = hashing.DefaultSimilarityThreshold
 	}
-	if similarityThreshold > hashing.MaxSimilarityThreshold {
-		similarityThreshold = hashing.MaxSimilarityThreshold
+	if threshold > hashing.MaxSimilarityThreshold {
+		threshold = hashing.MaxSimilarityThreshold
 	}
+
+	// Resolved once, here, rather than left as zeroes for something downstream
+	// to default. The handler logs these values and the store records them on
+	// every cluster row as "the thresholds this was built with", and both of
+	// those are lies if the struct still holds an unset zero.
+	opts := clustering.Options{
+		MaxGap:          t.MaxGap,
+		MaxRadiusMeters: t.MaxRadiusMeters,
+	}.WithDefaults()
+
 	return &Handlers{
 		store:               st,
 		processor:           processor,
 		log:                 log,
-		similarityThreshold: similarityThreshold,
+		similarityThreshold: threshold,
+		clustering:          opts,
 	}
 }
 
@@ -56,6 +84,35 @@ func (h *Handlers) RegisterAll(w *Worker) {
 	w.Register(jobs.TypeAnalyzeQuality, h.AnalyzeQuality)
 	w.Register(jobs.TypeBuildDuplicateGroups, h.BuildDuplicateGroups)
 	w.Register(jobs.TypeBuildSimilarGroups, h.BuildSimilarGroups)
+	w.Register(jobs.TypeBuildClusters, h.BuildClusters)
+}
+
+// BuildClusters handles the BUILD_CLUSTERS aggregate stage.
+func (h *Handlers) BuildClusters(ctx context.Context, job jobs.Job) error {
+	// One prerequisite: clustering reads captured_at and GPS, both of which
+	// EXTRACT_METADATA writes. Running first would cluster a library in which
+	// every photo still looked undated, produce a single empty-ish result, and
+	// never revisit it -- the aggregate runs once.
+	//
+	// Deferring reschedules WITHOUT consuming an attempt, so waiting for a
+	// slow metadata pass cannot exhaust the retry budget and kill the stage.
+	outstanding, err := h.store.CountOutstandingJobsOfType(ctx, job.LibraryID, jobs.TypeExtractMetadata)
+	if err != nil {
+		return fmt.Errorf("checking %s progress: %w", jobs.TypeExtractMetadata, err)
+	}
+	if outstanding > 0 {
+		return jobs.Defer(2*time.Second,
+			fmt.Sprintf("%d %s jobs still outstanding", outstanding, jobs.TypeExtractMetadata))
+	}
+
+	clusters, undated, err := h.store.RebuildClusters(ctx, job.LibraryID, h.clustering)
+	if err != nil {
+		return fmt.Errorf("rebuilding clusters: %w", err)
+	}
+	h.log.Info("rebuilt clusters",
+		"library_id", job.LibraryID, "clusters", clusters, "undated_photos", undated,
+		"max_gap", h.clustering.MaxGap, "max_radius_meters", h.clustering.MaxRadiusMeters)
+	return nil
 }
 
 // ExtractMetadata handles one EXTRACT_METADATA job.
