@@ -140,6 +140,13 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	similar, err := s.store.SummariseSimilar(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("summarising similar", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to summarise")
+		return
+	}
+
 	meta, err := s.store.SummariseMetadata(r.Context(), lib.ID)
 	if err != nil {
 		log.Error("summarising metadata", "error", err, "library_id", lib.ID)
@@ -153,6 +160,7 @@ func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
 		"photos_by_state": byState,
 		"metadata":        meta,
 		"duplicates":      dupes,
+		"similar":         similar,
 		// Whether THIS process is scanning/extracting. Distinct from
 		// scan_state, which is what the database believes -- if they disagree
 		// after a crash, that is worth being able to see.
@@ -525,5 +533,39 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 			"total_slots":  capacity,
 			"running_jobs": running,
 		},
+	})
+}
+
+// handleListSimilar returns near-duplicate groups.
+func (s *Server) handleListSimilar(w http.ResponseWriter, r *http.Request) {
+	log := loggerFrom(r.Context(), s.log)
+
+	lib, ok := s.lookupLibrary(w, r)
+	if !ok {
+		return
+	}
+
+	q := r.URL.Query()
+	groups, err := s.store.ListSimilarGroups(r.Context(), lib.ID,
+		atoiDefault(q.Get("limit"), 50), atoiDefault(q.Get("offset"), 0))
+	if err != nil {
+		log.Error("listing similar groups", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to list similar groups")
+		return
+	}
+
+	summary, err := s.store.SummariseSimilar(r.Context(), lib.ID)
+	if err != nil {
+		log.Error("summarising similar groups", "error", err, "library_id", lib.ID)
+		writeError(w, log, http.StatusInternalServerError, "internal", "failed to summarise")
+		return
+	}
+
+	writeJSON(w, log, http.StatusOK, map[string]any{
+		"groups":  groups,
+		"summary": summary,
+		"note": "suggestions only; no files have been or will be deleted by this application. " +
+			"distance is Hamming distance out of 64 bits; a group marked chained is wider " +
+			"than its threshold because members were connected through intermediates",
 	})
 }

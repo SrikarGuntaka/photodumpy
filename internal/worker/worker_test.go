@@ -73,6 +73,33 @@ func testLibrary(t *testing.T, st *store.Store) string {
 	return lib.ID
 }
 
+// resetQueue empties the jobs and workers tables.
+//
+// Necessary because ClaimJobs is deliberately NOT scoped to a library: in
+// production one worker drains the entire queue across every library, which is
+// the right behaviour. The consequence for tests is that a worker spawned by
+// one test will happily claim jobs left pending by another, fill its slots
+// with them, and invalidate any exact count.
+//
+// Observed: TestKilledWorkerMidFlightLosesNoWork passed alone ("victim holds 4
+// jobs") and failed in the package run ("victim holds 0 jobs") for exactly
+// this reason. Tests that spawn real Worker instances and assert on counts
+// call this first.
+func resetQueue(t *testing.T, st *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	for _, stmt := range []string{
+		`DELETE FROM job_executions`,
+		`DELETE FROM jobs`,
+		`DELETE FROM workers`,
+	} {
+		if _, err := st.Pool().Exec(ctx, stmt); err != nil {
+			t.Fatalf("resetting queue (%s): %v", stmt, err)
+		}
+	}
+}
+
 // enqueueN queues n no-op jobs against a library.
 func enqueueN(t *testing.T, st *store.Store, libraryID string, n int) {
 	t.Helper()
@@ -100,6 +127,7 @@ func enqueueN(t *testing.T, st *store.Store, libraryID string, n int) {
 func TestConcurrentClaimsNeverOverlap(t *testing.T) {
 	st := store.New(testPool(t))
 	libID := testLibrary(t, st)
+	resetQueue(t, st)
 
 	const totalJobs = 300
 	const workers = 8
@@ -243,6 +271,7 @@ func TestBackoffDelaysClaimability(t *testing.T) {
 func TestCrashedWorkerJobsAreReclaimed(t *testing.T) {
 	st := store.New(testPool(t))
 	libID := testLibrary(t, st)
+	resetQueue(t, st)
 
 	const total = 20
 	enqueueN(t, st, libID, total)
@@ -651,6 +680,7 @@ func TestEnqueueAllowedAfterSuccess(t *testing.T) {
 func TestWorkerPoolDrainsQueueWithoutOverlap(t *testing.T) {
 	st := store.New(testPool(t))
 	libID := testLibrary(t, st)
+	resetQueue(t, st)
 
 	const totalJobs = 120
 	const workerCount = 4
@@ -736,6 +766,7 @@ func TestWorkerPoolDrainsQueueWithoutOverlap(t *testing.T) {
 func TestKilledWorkerMidFlightLosesNoWork(t *testing.T) {
 	st := store.New(testPool(t))
 	libID := testLibrary(t, st)
+	resetQueue(t, st)
 
 	const totalJobs = 60
 	enqueueN(t, st, libID, totalJobs)
@@ -846,6 +877,7 @@ func TestKilledWorkerMidFlightLosesNoWork(t *testing.T) {
 func TestCleanShutdownStrandsNothing(t *testing.T) {
 	st := store.New(testPool(t))
 	libID := testLibrary(t, st)
+	resetQueue(t, st)
 	enqueueN(t, st, libID, 20)
 
 	handler := func(ctx context.Context, job jobs.Job) error {
@@ -901,6 +933,7 @@ func TestCleanShutdownStrandsNothing(t *testing.T) {
 func TestUnknownJobTypeFailsPermanently(t *testing.T) {
 	st := store.New(testPool(t))
 	libID := testLibrary(t, st)
+	resetQueue(t, st)
 
 	e := jobs.NewPhotoJob(jobs.Type("NO_SUCH_TYPE"), uuid.NewString(), libID)
 	if _, err := st.EnqueueJobs(context.Background(), []jobs.Enqueue{e}); err != nil {
@@ -946,6 +979,7 @@ func TestUnknownJobTypeFailsPermanently(t *testing.T) {
 func TestHandlerPermanentErrorKillsJobOnFirstAttempt(t *testing.T) {
 	st := store.New(testPool(t))
 	libID := testLibrary(t, st)
+	resetQueue(t, st)
 	enqueueN(t, st, libID, 1)
 
 	handler := func(context.Context, jobs.Job) error {
@@ -1179,6 +1213,7 @@ func TestRepeatedDeferralsNeverExhaustAttempts(t *testing.T) {
 func TestAggregateWaitsForPrerequisites(t *testing.T) {
 	st := store.New(testPool(t))
 	libID := testLibrary(t, st)
+	resetQueue(t, st)
 
 	// Enough per-photo jobs that they cannot all finish instantly.
 	const photoJobs = 40

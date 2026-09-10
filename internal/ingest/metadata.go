@@ -200,92 +200,31 @@ func (p *Processor) ProcessLibrary(ctx context.Context, lib *photos.Library) (*M
 	start := time.Now()
 	result := &MetadataResult{LibraryID: lib.ID}
 
-	sem := make(chan struct{}, p.concurrency)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	var firstErr error
+	// Full NumCPU concurrency: metadata extraction reads image headers, a few
+	// hundred bytes per file, so it is I/O-bound rather than memory-bound.
+	// Pixel work uses a tighter bound -- see maxPixelConcurrency.
+	res := runPass(ctx, p.concurrency, metadataBatchSize,
+		func(ctx context.Context, limit int) ([]store.PhotoNeedingMetadata, error) {
+			return p.store.ListPhotosNeedingMetadata(ctx, lib.ID, limit)
+		},
+		func(ctx context.Context, ph store.PhotoNeedingMetadata) error {
+			return p.ExtractOne(ctx, lib.RootPath, ph)
+		},
+		func(ph store.PhotoNeedingMetadata, err error) {
+			p.log.Warn("metadata extraction failed",
+				"photo_id", ph.ID, "path", ph.RelativePath, "error", err)
+		})
 
-	for {
-		if ctx.Err() != nil {
-			result.Interrupted = true
-			break
-		}
-
-		batch, err := p.store.ListPhotosNeedingMetadata(ctx, lib.ID, metadataBatchSize)
-		if err != nil {
-			if ctx.Err() != nil {
-				result.Interrupted = true
-				break
-			}
-			return result, err
-		}
-		if len(batch) == 0 {
-			break // all done
-		}
-
-		for _, photo := range batch {
-			// Acquire a slot before spawning, so the number of in-flight
-			// goroutines is capped rather than merely their throughput.
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				result.Interrupted = true
-			}
-			if ctx.Err() != nil {
-				break
-			}
-
-			wg.Add(1)
-			go func(ph store.PhotoNeedingMetadata) {
-				defer wg.Done()
-				defer func() { <-sem }()
-
-				err := p.ExtractOne(ctx, lib.RootPath, ph)
-
-				mu.Lock()
-				defer mu.Unlock()
-				if err != nil {
-					// A cancelled context is not a processing failure.
-					if ctx.Err() == nil {
-						result.Failed++
-						if firstErr == nil {
-							firstErr = err
-						}
-						p.log.Warn("metadata extraction failed",
-							"photo_id", ph.ID, "path", ph.RelativePath, "error", err)
-					}
-					return
-				}
-				result.Processed++
-			}(photo)
-		}
-
-		// Wait for this batch before claiming the next. Without it the loop
-		// re-queries while the batch is still in flight; those goroutines have
-		// not written metadata_extracted_at yet, so the same rows come back and
-		// are processed again. The duplicated work is invisible in the data
-		// (the writes are idempotent) but wastes I/O and inflates the counters.
-		wg.Wait()
-
-		if ctx.Err() != nil {
-			result.Interrupted = true
-			break
-		}
-	}
-
-	wg.Wait()
+	result.Processed, result.Failed, result.Interrupted = res.Done, res.Failed, res.Interrupted
 	result.DurationMS = time.Since(start).Milliseconds()
 
-	// A cancelled run is not an error: rows already written are valid, and
-	// resuming picks up where it stopped because metadata_extracted_at marks
-	// what is done.
-	if result.Interrupted {
+	if res.Interrupted {
 		return result, nil
 	}
-	if firstErr != nil && result.Processed == 0 {
+	if res.FirstErr != nil && res.Done == 0 {
 		// Everything failed -- likely the library root is gone rather than
-		// every individual file being broken. Worth surfacing as an error.
-		return result, firstErr
+		// every individual file being broken.
+		return result, res.FirstErr
 	}
 	return result, nil
 }

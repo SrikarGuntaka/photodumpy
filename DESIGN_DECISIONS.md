@@ -172,10 +172,24 @@ least one identical band (pigeonhole principle: 4 bands, at most 3 differing
 bits, so one band is untouched). Candidate generation becomes 4 indexed lookups
 instead of a full scan, with no false negatives below the threshold.
 
-**Cost, stated honestly.** At the scales this project can realistically test,
-the speedup may be "3s to 0.2s" rather than order-of-magnitude. The O(n²)
-behaviour will be documented and measured rather than hidden, and the
-optimisation will only be built if a measurement justifies it.
+**MEASURED, and the numbers settle it.** `BenchmarkGroupSimilar`:
+
+| photos | time | comparisons |
+|--------|------|-------------|
+| 100 | 41 µs | 5K |
+| 1,000 | 798 µs | 500K |
+| 5,000 | 20.4 ms | 12.5M |
+
+Clean quadratic scaling (5× the photos, 25× the time), which extrapolates to
+roughly **80 ms at 10,000 photos** and ~8 s at 100,000.
+
+So the optimisation would save 79 milliseconds on a realistic library. It stays
+unbuilt — not on a hunch now, but on a measurement. The benchmark is committed
+so the crossover can be re-checked if libraries get much larger.
+
+This is also a correction to an earlier estimate in this file's history: I
+guessed the win might be "3s to 0.2s". The real figure is far more lopsided,
+which is the argument for measuring rather than estimating.
 
 ---
 
@@ -329,3 +343,73 @@ the code that fills it keeps the migration history a truthful record of how the
 system grew, and means every column in the database at any commit has a writer.
 
 **Cost.** More migration files. That is what migrations are for.
+
+
+---
+
+## 15. Similarity grouping uses connected components, not cliques
+
+**Decision.** Photos within the Hamming threshold are joined with union-find,
+and each connected component becomes a group.
+
+**The problem this creates, stated up front.** Similarity within a threshold is
+**not transitive**. A and B may be 9 apart, B and C 9 apart, and A and C 18
+apart — beyond the threshold — yet all three land in one group.
+
+**Why not cliques.** Requiring every pair in a group to be within the threshold
+is exact, and has two problems. Finding maximal cliques is NP-hard. And it
+splits genuine burst sequences: in a 20-shot burst each frame resembles its
+neighbours while the first and last frame differ substantially, so a clique
+approach yields fourteen overlapping groups where the user wanted one.
+
+**How the risk is mitigated rather than hidden:**
+
+- The threshold is deliberately tight — 10 bits of 64. On the fixture corpus
+  unrelated photos average 30 bits apart, so a chain needs several improbable
+  intermediate hops.
+- `max_distance` is stored per group and compared against the threshold. A
+  group wider than its own threshold is flagged `chained` in the API and marked
+  in the CLI, so a drifted group is visible rather than presented with the same
+  confidence as a tight one.
+- Every member's distance from the suggested keeper is exposed, so a user can
+  see *why* a photo is in a group instead of being asked to trust it.
+
+**Cost.** Some groups will be wider than a strict reading of the threshold
+implies. That is the price of not fragmenting bursts, and it is surfaced rather
+than swallowed.
+
+---
+
+## 16. The similarity threshold was calibrated, not chosen
+
+**Decision.** Default Hamming distance 10 of 64, configurable via
+`SIMILARITY_THRESHOLD`, hard-capped at 24.
+
+**How it was arrived at.** The first fixture corpus made dHash look broken:
+near-duplicates measured 9–20 apart while unrelated photos averaged 25 — the
+distributions overlapped and no threshold could separate them. Rather than
+widen the threshold until tests passed, both image styles were measured:
+
+| image style | near-duplicate | unrelated | separation |
+|-------------|----------------|-----------|------------|
+| hard edges + fine stripes | mean 18.0, max 30 | mean 20.6, min 8 | **−22 (overlapping)** |
+| smooth low-frequency | mean 1.3, max 4 | mean 32.2, min 13 | **+9 (clean)** |
+
+The fixtures were the problem. A perceptual hash samples a 9×8 grid, and the
+corpus drew a 6px diagonal stripe every 64px — a periodic pattern that aliases
+catastrophically at that scale. Photographs have no such structure.
+
+With photo-realistic fixtures the corpus gives near-duplicates at worst 8 and
+unrelated at mean 30.2 with zero false positives, so 10 sits comfortably in the
+gap.
+
+**The honest limitation.** This is calibrated against *synthetic* images. Real
+photographs — especially flat scenes, night shots and heavily edited frames —
+may sit differently, and the threshold should be re-checked against a real
+library before anyone relies on the default. That is what
+`SIMILARITY_THRESHOLD` is for, and why the API exposes raw distances rather
+than only a yes/no.
+
+**Cap at 24.** Random unrelated hashes differ by ~32 bits, so a threshold near
+that groups everything with everything. 24 is where the feature stops being
+meaningful.

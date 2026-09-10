@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/srikarguntaka/photo-organizer/internal/hashing"
 	"github.com/srikarguntaka/photo-organizer/internal/ingest"
 	"github.com/srikarguntaka/photo-organizer/internal/jobs"
 	"github.com/srikarguntaka/photo-organizer/internal/metadata"
@@ -24,17 +25,36 @@ type Handlers struct {
 	store     *store.Store
 	processor *ingest.Processor
 	log       *slog.Logger
+
+	// similarityThreshold is the Hamming distance below which two photos are
+	// considered near-duplicates. Configurable because it is a judgement call,
+	// not a constant of nature -- see hashing.DefaultSimilarityThreshold for
+	// the calibration behind the default.
+	similarityThreshold int
 }
 
-func NewHandlers(st *store.Store, processor *ingest.Processor, log *slog.Logger) *Handlers {
-	return &Handlers{store: st, processor: processor, log: log}
+func NewHandlers(st *store.Store, processor *ingest.Processor, log *slog.Logger, similarityThreshold int) *Handlers {
+	if similarityThreshold <= 0 {
+		similarityThreshold = hashing.DefaultSimilarityThreshold
+	}
+	if similarityThreshold > hashing.MaxSimilarityThreshold {
+		similarityThreshold = hashing.MaxSimilarityThreshold
+	}
+	return &Handlers{
+		store:               st,
+		processor:           processor,
+		log:                 log,
+		similarityThreshold: similarityThreshold,
+	}
 }
 
 // RegisterAll attaches every handler to a worker.
 func (h *Handlers) RegisterAll(w *Worker) {
 	w.Register(jobs.TypeExtractMetadata, h.ExtractMetadata)
 	w.Register(jobs.TypeComputeFileHash, h.ComputeFileHash)
+	w.Register(jobs.TypeComputePerceptualHash, h.ComputePerceptualHash)
 	w.Register(jobs.TypeBuildDuplicateGroups, h.BuildDuplicateGroups)
+	w.Register(jobs.TypeBuildSimilarGroups, h.BuildSimilarGroups)
 }
 
 // ExtractMetadata handles one EXTRACT_METADATA job.
@@ -81,6 +101,52 @@ func (h *Handlers) ComputeFileHash(ctx context.Context, job jobs.Job) error {
 		RelativePath:  photo.RelativePath,
 		FileSizeBytes: photo.FileSizeBytes,
 	})
+}
+
+// ComputePerceptualHash handles one COMPUTE_PERCEPTUAL_HASH job.
+func (h *Handlers) ComputePerceptualHash(ctx context.Context, job jobs.Job) error {
+	lib, err := h.store.GetLibrary(ctx, job.LibraryID)
+	if err != nil {
+		return h.libraryError(err)
+	}
+
+	photo, err := h.store.GetPhoto(ctx, job.TargetID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return jobs.Permanent(fmt.Errorf("photo %s no longer exists", job.TargetID))
+		}
+		return fmt.Errorf("loading photo: %w", err)
+	}
+
+	return h.processor.PHashOne(ctx, lib.RootPath, store.PhotoNeedingPHash{
+		ID:           photo.ID,
+		RelativePath: photo.RelativePath,
+	})
+}
+
+// BuildSimilarGroups handles the near-duplicate aggregate stage.
+//
+// Same prerequisite discipline as BuildDuplicateGroups: it refuses to run
+// while the perceptual hashing it depends on is still outstanding, because
+// grouping over a partially-hashed library produces a confident wrong answer.
+func (h *Handlers) BuildSimilarGroups(ctx context.Context, job jobs.Job) error {
+	outstanding, err := h.store.CountOutstandingJobsOfType(ctx, job.LibraryID, jobs.TypeComputePerceptualHash)
+	if err != nil {
+		return fmt.Errorf("checking perceptual hashing progress: %w", err)
+	}
+	if outstanding > 0 {
+		return jobs.Defer(2*time.Second,
+			fmt.Sprintf("%d COMPUTE_PERCEPTUAL_HASH jobs still outstanding", outstanding))
+	}
+
+	groups, reclaimable, err := h.store.RebuildSimilarGroups(ctx, job.LibraryID, h.similarityThreshold)
+	if err != nil {
+		return fmt.Errorf("rebuilding similar groups: %w", err)
+	}
+	h.log.Info("rebuilt similar groups",
+		"library_id", job.LibraryID, "groups", groups,
+		"threshold", h.similarityThreshold, "reclaimable_bytes", reclaimable)
+	return nil
 }
 
 // BuildDuplicateGroups handles the aggregate stage.

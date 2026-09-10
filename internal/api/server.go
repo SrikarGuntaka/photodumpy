@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/libraries/{id}/metadata", s.handleExtractMetadata)
 	mux.HandleFunc("POST /api/libraries/{id}/hash", s.handleHashLibrary)
 	mux.HandleFunc("GET /api/libraries/{id}/duplicates", s.handleListDuplicates)
+	mux.HandleFunc("GET /api/libraries/{id}/similar", s.handleListSimilar)
 
 	// Job queue (Phase 5). /process enqueues work for the worker pool; the
 	// older /metadata and /hash endpoints still run in-process and are kept

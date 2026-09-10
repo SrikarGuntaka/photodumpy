@@ -35,6 +35,7 @@ Commands:
   process <library-id>   Extract metadata (EXIF, GPS, dimensions) for a library
   hash <library-id>      Compute SHA-256 hashes and find exact duplicates
   duplicates <lib-id>    Show exact-duplicate groups (suggestions only)
+  similar <library-id>   Show near-duplicate groups (suggestions only)
   queue <library-id>     Enqueue the pipeline as jobs for the worker pool
   jobs <library-id>      Show queue state
   workers                Show the worker fleet
@@ -131,6 +132,11 @@ func run(args []string, out io.Writer) error {
 			return errors.New("duplicates requires a library id: photo-organizer duplicates <library-id>")
 		}
 		return cmdDuplicates(ctx, c, out, rest[0], *limit, *offset)
+	case "similar":
+		if len(rest) < 1 {
+			return errors.New("similar requires a library id: photo-organizer similar <library-id>")
+		}
+		return cmdSimilar(ctx, c, out, rest[0], *limit, *offset)
 	case "queue":
 		if len(rest) < 1 {
 			return errors.New("queue requires a library id: photo-organizer queue <library-id>")
@@ -327,6 +333,41 @@ type duplicateGroup struct {
 type duplicatesResponse struct {
 	Groups  []duplicateGroup `json:"groups"`
 	Summary duplicateSummary `json:"summary"`
+}
+
+type similarSummary struct {
+	Groups           int   `json:"groups"`
+	SimilarPhotos    int   `json:"similar_photos"`
+	ReclaimableBytes int64 `json:"reclaimable_bytes"`
+	ChainedGroups    int   `json:"chained_groups"`
+	PHashed          int   `json:"phashed"`
+	PendingPHash     int   `json:"pending_phash"`
+}
+
+type similarMember struct {
+	PhotoID       string `json:"photo_id"`
+	RelativePath  string `json:"relative_path"`
+	FileSizeBytes int64  `json:"file_size_bytes"`
+	Width         *int   `json:"width"`
+	Height        *int   `json:"height"`
+	Distance      int    `json:"distance"`
+	Rank          int    `json:"rank"`
+	SuggestedKeep bool   `json:"suggested_keep"`
+}
+
+type similarGroup struct {
+	ID               string          `json:"id"`
+	PhotoCount       int             `json:"photo_count"`
+	Threshold        int             `json:"threshold"`
+	MaxDistance      int             `json:"max_distance"`
+	ReclaimableBytes int64           `json:"reclaimable_bytes"`
+	Chained          bool            `json:"chained"`
+	Photos           []similarMember `json:"photos"`
+}
+
+type similarResponse struct {
+	Groups  []similarGroup `json:"groups"`
+	Summary similarSummary `json:"summary"`
 }
 
 type jobCounts struct {
@@ -578,6 +619,65 @@ func printMetadataSummary(out io.Writer, m metadataSummary) {
 	if m.Failed > 0 {
 		fmt.Fprintf(out, "  failed to decode      %d\n", m.Failed)
 	}
+}
+
+// cmdSimilar lists near-duplicate groups.
+func cmdSimilar(ctx context.Context, c *client, out io.Writer, libraryID string, limit, offset int) error {
+	var resp similarResponse
+	url := fmt.Sprintf("/api/libraries/%s/similar?limit=%d&offset=%d", libraryID, limit, offset)
+	if _, err := c.get(ctx, url, &resp); err != nil {
+		return err
+	}
+
+	s := resp.Summary
+	fmt.Fprintf(out, "Similar groups     %d\n", s.Groups)
+	fmt.Fprintf(out, "Photos involved    %d\n", s.SimilarPhotos)
+	fmt.Fprintf(out, "Reclaimable        %s\n", humanBytes(s.ReclaimableBytes))
+	if s.ChainedGroups > 0 {
+		fmt.Fprintf(out, "Chained groups     %d  (wider than the threshold; worth reviewing)\n", s.ChainedGroups)
+	}
+	if s.PendingPHash > 0 {
+		fmt.Fprintf(out, "\n%d photos are not perceptually hashed yet -- results are incomplete.\n", s.PendingPHash)
+	}
+	fmt.Fprintln(out)
+
+	if len(resp.Groups) == 0 {
+		if s.PHashed == 0 {
+			fmt.Fprintf(out, "Nothing hashed yet. Run:  photo-organizer queue %s -wait\n", libraryID)
+		} else {
+			fmt.Fprintln(out, "No near-duplicates found.")
+		}
+		return nil
+	}
+
+	for i, g := range resp.Groups {
+		marker := ""
+		if g.Chained {
+			marker = fmt.Sprintf("  [CHAINED: widest pair %d exceeds threshold %d]",
+				g.MaxDistance, g.Threshold)
+		}
+		fmt.Fprintf(out, "Group %d  (%d photos, %s reclaimable)%s\n",
+			offset+i+1, g.PhotoCount, humanBytes(g.ReclaimableBytes), marker)
+
+		for _, p := range g.Photos {
+			label := "similar"
+			if p.SuggestedKeep {
+				label = "KEEP   "
+			}
+			dims := "-"
+			if p.Width != nil && p.Height != nil {
+				dims = fmt.Sprintf("%dx%d", *p.Width, *p.Height)
+			}
+			fmt.Fprintf(out, "  %s  dist %2d  %-10s  %-11s  %s\n",
+				label, p.Distance, humanBytes(p.FileSizeBytes), dims, p.RelativePath)
+		}
+		fmt.Fprintln(out)
+	}
+
+	fmt.Fprintln(out, "These are suggestions. No files have been modified, moved or deleted.")
+	fmt.Fprintln(out, "dist = Hamming distance from the KEEP photo, out of 64 bits.")
+	fmt.Fprintln(out, "KEEP prefers higher resolution, then a larger file at equal resolution.")
+	return nil
 }
 
 // cmdQueue enqueues the pipeline as jobs and optionally watches it drain.

@@ -23,8 +23,8 @@ Built in phases, each independently runnable and testable.
 | 3 | Metadata extraction (EXIF, GPS, dimensions) | **Done** |
 | 4 | Exact duplicate detection (SHA-256) | **Done** |
 | 5 | Distributed job queue: leases, retries, crash recovery | Next |
-| 6 | Near-duplicate detection (perceptual hashing) | Planned |
-| 7 | Quality analysis (sharpness, exposure, contrast) | Planned |
+| 6 | Near-duplicate detection (perceptual hashing) | **Done** |
+| 7 | Quality analysis (sharpness, exposure, contrast) | Next |
 | 8 | Time + location clustering | Planned |
 | 9 | Full read API | Planned |
 | 10 | React frontend | Planned |
@@ -86,6 +86,7 @@ The API is on <http://localhost:8080>:
 | `POST /api/libraries/{id}/metadata` | Extract EXIF/GPS/dimensions. Returns 202; poll for progress. |
 | `POST /api/libraries/{id}/hash` | Compute SHA-256 and rebuild duplicate groups. Returns 202. |
 | `GET /api/libraries/{id}/duplicates` | Exact-duplicate groups, biggest saving first. |
+| `GET /api/libraries/{id}/similar` | Near-duplicate groups with per-photo distances. |
 | `GET /api/libraries/{id}/photos` | Paginated photo list with metadata. |
 
 ## Scanning a folder

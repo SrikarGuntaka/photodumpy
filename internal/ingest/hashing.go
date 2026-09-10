@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/srikarguntaka/photo-organizer/internal/hashing"
@@ -97,92 +96,28 @@ func (p *Processor) HashLibrary(ctx context.Context, lib *photos.Library) (*Hash
 	start := time.Now()
 	result := &HashResult{LibraryID: lib.ID}
 
-	sem := make(chan struct{}, p.concurrency)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	var firstErr error
+	// Full NumCPU concurrency: SHA-256 streams through a fixed 64KB buffer, so
+	// memory does not scale with file size and this is I/O-bound.
+	res := runPass(ctx, p.concurrency, metadataBatchSize,
+		func(ctx context.Context, limit int) ([]store.PhotoNeedingHash, error) {
+			return p.store.ListPhotosNeedingHash(ctx, lib.ID, limit)
+		},
+		func(ctx context.Context, ph store.PhotoNeedingHash) error {
+			return p.HashOne(ctx, lib.RootPath, ph)
+		},
+		func(ph store.PhotoNeedingHash, err error) {
+			p.log.Warn("hashing failed",
+				"photo_id", ph.ID, "path", ph.RelativePath, "error", err)
+		})
 
-	for {
-		if ctx.Err() != nil {
-			result.Interrupted = true
-			break
-		}
-
-		batch, err := p.store.ListPhotosNeedingHash(ctx, lib.ID, metadataBatchSize)
-		if err != nil {
-			if ctx.Err() != nil {
-				result.Interrupted = true
-				break
-			}
-			return result, err
-		}
-		if len(batch) == 0 {
-			break
-		}
-
-		for _, ph := range batch {
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				result.Interrupted = true
-			}
-			if ctx.Err() != nil {
-				break
-			}
-
-			wg.Add(1)
-			go func(ph store.PhotoNeedingHash) {
-				defer wg.Done()
-				defer func() { <-sem }()
-
-				err := p.HashOne(ctx, lib.RootPath, ph)
-
-				mu.Lock()
-				defer mu.Unlock()
-				if err != nil {
-					if ctx.Err() == nil {
-						result.Failed++
-						if firstErr == nil {
-							firstErr = err
-						}
-						p.log.Warn("hashing failed",
-							"photo_id", ph.ID, "path", ph.RelativePath, "error", err)
-					}
-					return
-				}
-				result.Hashed++
-			}(ph)
-		}
-
-		// Wait for this batch before claiming the next.
-		//
-		// Without this the loop re-queries while the batch is still in flight.
-		// Those goroutines have not written hashed_at yet, so the SAME rows
-		// come back and are processed a second time -- unbounded goroutine
-		// growth and duplicated I/O, invisible in the data because the writes
-		// are idempotent. Caught by asserting an exact count: 3 files hashed 6
-		// times.
-		//
-		// The cost is that workers idle briefly at each batch boundary. With
-		// batches of 200 and concurrency in the low tens that is a rounding
-		// error, and correctness is not negotiable here.
-		wg.Wait()
-
-		if ctx.Err() != nil {
-			result.Interrupted = true
-			break
-		}
-	}
-
-	wg.Wait()
+	result.Hashed, result.Failed, result.Interrupted = res.Done, res.Failed, res.Interrupted
 	result.DurationMS = time.Since(start).Milliseconds()
 
-	if result.Interrupted {
-		// Groups are deliberately NOT rebuilt after an interrupted pass. Doing
-		// so would publish groups derived from a partially-hashed library,
-		// which looks authoritative but is wrong -- a file whose hash has not
-		// been computed yet cannot be known to be unique. Resuming completes
-		// the hashing and then builds groups over the full picture.
+	if res.Interrupted {
+		// Groups are deliberately NOT rebuilt after an interrupted pass:
+		// publishing groups derived from a partially-hashed library looks
+		// authoritative but is wrong, since an unhashed file cannot be known
+		// to be unique.
 		return result, nil
 	}
 
@@ -194,8 +129,8 @@ func (p *Processor) HashLibrary(ctx context.Context, lib *photos.Library) (*Hash
 	result.ReclaimableBytes = reclaimable
 	result.DurationMS = time.Since(start).Milliseconds()
 
-	if firstErr != nil && result.Hashed == 0 {
-		return result, firstErr
+	if res.FirstErr != nil && res.Done == 0 {
+		return result, res.FirstErr
 	}
 	return result, nil
 }

@@ -70,7 +70,7 @@ func run() error {
 		Concurrency:   concurrency,
 		ShutdownGrace: cfg.ShutdownGrace,
 	})
-	worker.NewHandlers(st, processor, log).RegisterAll(w)
+	worker.NewHandlers(st, processor, log, cfg.SimilarityThreshold).RegisterAll(w)
 
 	return w.Run(ctx)
 }

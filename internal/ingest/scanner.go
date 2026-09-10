@@ -256,6 +256,7 @@ func (s *Scanner) EnqueuePhotoJobs(ctx context.Context, libraryID string) (int, 
 	}{
 		{jobs.TypeExtractMetadata, s.store.ListPhotoIDsNeedingMetadata},
 		{jobs.TypeComputeFileHash, s.store.ListPhotoIDsNeedingHash},
+		{jobs.TypeComputePerceptualHash, s.store.ListPhotoIDsNeedingPHash},
 	} {
 		cursor := ""
 		for {
@@ -292,6 +293,7 @@ func (s *Scanner) EnqueuePhotoJobs(ctx context.Context, libraryID string) (int, 
 	// per-photo work it depends on drains first.
 	n, err := s.store.EnqueueJobs(ctx, []jobs.Enqueue{
 		jobs.NewLibraryJob(jobs.TypeBuildDuplicateGroups, libraryID),
+		jobs.NewLibraryJob(jobs.TypeBuildSimilarGroups, libraryID),
 	})
 	if err != nil {
 		return total, err

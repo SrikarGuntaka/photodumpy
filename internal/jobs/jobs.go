@@ -21,11 +21,13 @@ type Type string
 
 const (
 	// Per-photo jobs. Embarrassingly parallel; each writes only its own row.
-	TypeExtractMetadata Type = "EXTRACT_METADATA"
-	TypeComputeFileHash Type = "COMPUTE_FILE_HASH"
+	TypeExtractMetadata       Type = "EXTRACT_METADATA"
+	TypeComputeFileHash       Type = "COMPUTE_FILE_HASH"
+	TypeComputePerceptualHash Type = "COMPUTE_PERCEPTUAL_HASH"
 
 	// Aggregate stages. One per library, needing a global view.
 	TypeBuildDuplicateGroups Type = "BUILD_DUPLICATE_GROUPS"
+	TypeBuildSimilarGroups   Type = "BUILD_SIMILAR_GROUPS"
 )
 
 // TargetType distinguishes the two shapes of job.

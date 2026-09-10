@@ -5,10 +5,12 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -51,6 +53,19 @@ func Connect(ctx context.Context, dsn string, maxConns int32, timeout time.Durat
 			return pool, nil
 		}
 
+		// Distinguish "not ready yet" from "will never work".
+		//
+		// The retry loop exists for a Postgres that is still starting up. A
+		// missing database or bad credentials will not fix themselves, and
+		// retrying them burns the full timeout before reporting a problem the
+		// first attempt already knew about. Observed: an integration run
+		// against a dropped test database spent 30 seconds per test failing
+		// with a message that was correct on attempt one.
+		if permanent, why := permanentConnectError(err); permanent {
+			pool.Close()
+			return nil, fmt.Errorf("database: %s: %w", why, err)
+		}
+
 		if time.Now().After(deadline) {
 			pool.Close()
 			return nil, fmt.Errorf("database: unreachable after %s (%d attempts): %w", timeout, attempt, err)
@@ -70,5 +85,34 @@ func Connect(ctx context.Context, dsn string, maxConns int32, timeout time.Durat
 		if backoff < 4*time.Second {
 			backoff *= 2
 		}
+	}
+}
+
+// permanentConnectError reports whether a connection failure is one that
+// retrying cannot fix, along with a human-readable reason.
+//
+// SQLSTATE codes rather than message matching, so this keeps working across
+// Postgres versions and locales.
+func permanentConnectError(err error) (bool, string) {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		// Not a server response at all -- a dial failure, DNS, TLS. Those are
+		// exactly the transient cases the retry loop is for.
+		return false, ""
+	}
+
+	switch pgErr.Code {
+	case "3D000": // invalid_catalog_name
+		return true, "database does not exist"
+	case "28P01": // invalid_password
+		return true, "authentication failed"
+	case "28000": // invalid_authorization_specification
+		return true, "authorization rejected"
+	case "42501": // insufficient_privilege
+		return true, "insufficient privileges"
+	default:
+		// Everything else -- including "the database system is starting up"
+		// (57P03) -- is worth retrying.
+		return false, ""
 	}
 }
