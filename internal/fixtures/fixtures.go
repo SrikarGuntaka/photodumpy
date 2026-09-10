@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/draw"
 	"image/jpeg"
 	"image/png"
 	"math"
@@ -293,13 +292,29 @@ func Generate(opts Options) (*Manifest, error) {
 		case 4: // exposure extremes
 			t := shotAt.Format(time.RFC3339)
 
+			// These two are the SAME scene at different exposures, so they are
+			// genuinely near-duplicates and are labelled as such.
+			//
+			// The label was missing at first, and a perceptual-hash test duly
+			// reported them as false positives at distance 0-3. They were not:
+			// dHash compares neighbouring pixels, so a uniform brightness shift
+			// leaves every comparison unchanged. The ground truth was wrong,
+			// not the algorithm.
+			//
+			// This pair is also where two features meet. Near-duplicate
+			// detection says "these are the same photo"; quality analysis
+			// (Phase 7) says "this one is correctly exposed and that one is
+			// not". Together that is the suggest-the-best-copy feature, and
+			// neither half can do it alone.
+			exposureGroup := "sim-exposure-" + sceneID
+
 			dark := adjustBrightness(img, -95)
 			db, err := encodeJPEGWithEXIF(dark, 88, &shotAt, nil)
 			if err != nil {
 				return nil, err
 			}
 			if err := write(join(dir, sceneID+"-dark.jpg"), db, File{
-				Kind: "jpeg", Underexposed: true, CapturedAt: &t,
+				Kind: "jpeg", Underexposed: true, SimilarGroup: exposureGroup, CapturedAt: &t,
 				Width: 640, Height: 480,
 			}); err != nil {
 				return nil, err
@@ -311,7 +326,7 @@ func Generate(opts Options) (*Manifest, error) {
 				return nil, err
 			}
 			if err := write(join(dir, sceneID+"-bright.jpg"), bb, File{
-				Kind: "jpeg", Overexposed: true, CapturedAt: &t,
+				Kind: "jpeg", Overexposed: true, SimilarGroup: exposureGroup, CapturedAt: &t,
 				Width: 640, Height: 480,
 			}); err != nil {
 				return nil, err
@@ -477,15 +492,38 @@ func summarise(files []File) Summary {
 
 // --- image construction ---------------------------------------------------
 
-// scene builds a deterministic, visually distinct image. Structure matters:
-// a flat colour field has near-zero Laplacian variance and would register as
-// "blurry" no matter what, making quality tests meaningless.
+// scene builds a deterministic, photograph-like image.
 //
-// Content is derived from baseSeed *and* the scene id together. Both halves
-// matter: the id keeps scenes distinct from each other within one corpus, and
-// baseSeed keeps two corpora generated with different seeds from sharing
-// content — which is what lets a benchmark corpus and a test corpus coexist
-// without one's hashes colliding with the other's.
+// The structure here is not decorative -- it was chosen from measurement, and
+// the first version of it broke perceptual hashing outright.
+//
+// That version drew hard-edged rectangles plus a 6px diagonal stripe every
+// 64px. Measured against dHash:
+//
+//	hard edges + fine stripes:  near-dupe mean 18.0 max 30 | unrelated mean 20.6 min  8
+//	smooth low-frequency:       near-dupe mean  1.3 max  4 | unrelated mean 32.2 min 13
+//
+// The distributions OVERLAPPED. No threshold could separate "the same photo
+// recompressed" from "two unrelated photos", because a perceptual hash
+// downsamples to 9x8 and a periodic 6px pattern aliases catastrophically at
+// that scale -- a one-pixel shift from resizing moves stripes between cells and
+// scrambles the comparisons. Real photographs have no such pattern.
+//
+// So scenes are now built in two layers, and both are load-bearing:
+//
+//  1. LOW FREQUENCY: a few superimposed sinusoids. This is the large smooth
+//     luminance structure that survives downsampling, and it is what a
+//     perceptual hash actually sees. Without it, dHash has no stable signal.
+//
+//  2. FINE TEXTURE: irregular, non-periodic, low-amplitude detail. This gives
+//     sharpness metrics (Phase 7) something real to measure -- a purely smooth
+//     image has near-zero Laplacian variance and would register as blurry no
+//     matter what. It is deliberately non-periodic so it averages out under
+//     downsampling instead of aliasing.
+//
+// Content is derived from baseSeed and the scene id together: the id keeps
+// scenes distinct within one corpus, and baseSeed keeps two corpora generated
+// with different seeds from sharing content.
 func scene(baseSeed int64, id string, w, h int) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 
@@ -493,45 +531,115 @@ func scene(baseSeed int64, id string, w, h int) *image.RGBA {
 	for _, c := range id {
 		idHash = idHash*31 + int64(c)
 	}
-	// Multiply the seed by a large prime before mixing so that adjacent seeds
-	// (1, 2, 3) produce unrelated corpora rather than near-identical ones.
+	// Multiply the seed by a large prime before mixing so adjacent seeds
+	// produce unrelated corpora rather than near-identical ones.
 	local := rand.New(rand.NewSource(baseSeed*1000003 + idHash))
 
-	bg := color.RGBA{
-		R: uint8(60 + local.Intn(120)),
-		G: uint8(60 + local.Intn(120)),
-		B: uint8(60 + local.Intn(120)),
-		A: 255,
-	}
-	draw.Draw(img, img.Bounds(), &image.Uniform{bg}, image.Point{}, draw.Src)
-
-	// Hard-edged shapes give real high-frequency content for sharpness metrics.
-	for i := 0; i < 14; i++ {
-		x0 := local.Intn(w)
-		y0 := local.Intn(h)
-		rw := 20 + local.Intn(140)
-		rh := 20 + local.Intn(110)
-		c := color.RGBA{
-			R: uint8(local.Intn(256)),
-			G: uint8(local.Intn(256)),
-			B: uint8(local.Intn(256)),
-			A: 255,
+	// --- layer 1: low-frequency luminance structure ------------------------
+	type wave struct{ ax, ay, phase, amp float64 }
+	waves := make([]wave, 4)
+	for i := range waves {
+		waves[i] = wave{
+			// Low spatial frequencies only. Anything above ~3 cycles across
+			// the frame starts to alias at the 9x8 hash resolution.
+			ax:    (local.Float64()*2 - 1) * 2.5,
+			ay:    (local.Float64()*2 - 1) * 2.5,
+			phase: local.Float64() * 2 * math.Pi,
+			amp:   0.3 + local.Float64()*0.7,
 		}
-		draw.Draw(img, image.Rect(x0, y0, x0+rw, y0+rh).Intersect(img.Bounds()),
-			&image.Uniform{c}, image.Point{}, draw.Src)
 	}
 
-	// A diagonal gradient stripe, for directional gradient content (dHash
-	// compares horizontally adjacent pixels, so purely vertical structure
-	// would be invisible to it).
+	baseR := local.Float64()*80 + 70
+	baseG := local.Float64()*80 + 70
+	baseB := local.Float64()*80 + 70
+
+	// --- layer 2: fine texture --------------------------------------------
+	// A handful of irregular high-frequency components with incommensurable
+	// frequencies, so they never form a repeating pattern that could align
+	// with the downsample grid.
+	type detail struct{ ax, ay, phase, amp float64 }
+	details := make([]detail, 6)
+	for i := range details {
+		details[i] = detail{
+			ax:    18 + local.Float64()*37,
+			ay:    18 + local.Float64()*37,
+			phase: local.Float64() * 2 * math.Pi,
+			amp:   6 + local.Float64()*10,
+		}
+	}
+
+	clamp := func(f float64) uint8 {
+		if f < 0 {
+			return 0
+		}
+		if f > 255 {
+			return 255
+		}
+		return uint8(f)
+	}
+
+	// Evaluate the sinusoids with the angle-addition identity rather than
+	// calling sin() per pixel:
+	//
+	//	sin(A + B) = sin(A)cos(B) + cos(A)sin(B)
+	//
+	// where A depends only on x and B only on y. That turns 10 waves x 307,200
+	// pixels = ~3M transcendental calls into 10 x (640 + 480) = ~11,000, and
+	// the rest is multiply-add. The naive version made the fixture tests take
+	// 50 seconds; this is a few hundred milliseconds for identical output.
+	type axis struct{ sin, cos float64 }
+
+	prep := func(n int, coeff, phase float64) []axis {
+		out := make([]axis, n)
+		for i := 0; i < n; i++ {
+			a := coeff * (float64(i) / float64(n)) * 2 * math.Pi
+			out[i] = axis{math.Sin(a + phase), math.Cos(a + phase)}
+		}
+		return out
+	}
+
+	// Phase is folded into the x term so the y term stays a pure sinusoid.
+	lowX := make([][]axis, len(waves))
+	lowY := make([][]axis, len(waves))
+	for i, wv := range waves {
+		lowX[i] = prep(w, wv.ax, wv.phase)
+		lowY[i] = prep(h, wv.ay, 0)
+	}
+
+	fineX := make([][]axis, len(details))
+	fineY := make([][]axis, len(details))
+	for i, d := range details {
+		fineX[i] = prep(w, d.ax, d.phase)
+		fineY[i] = prep(h, d.ay, 0)
+	}
+
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			if (x+y)%64 < 6 {
-				v := uint8((x * 255) / w)
-				img.SetRGBA(x, y, color.RGBA{R: v, G: 255 - v, B: uint8((y * 255) / h), A: 255})
+			low := 0.0
+			for i, wv := range waves {
+				sx, cx := lowX[i][x].sin, lowX[i][x].cos
+				sy, cy := lowY[i][y].sin, lowY[i][y].cos
+				low += wv.amp * (sx*cy + cx*sy)
 			}
+			low = low / 4.0 * 90
+
+			fine := 0.0
+			for i, d := range details {
+				sx, cx := fineX[i][x].sin, fineX[i][x].cos
+				sy, cy := fineY[i][y].sin, fineY[i][y].cos
+				fine += d.amp * (sx*cy + cx*sy)
+			}
+			fine /= 6.0
+
+			img.SetRGBA(x, y, color.RGBA{
+				clamp(baseR + low + fine),
+				clamp(baseG + low*0.8 + fine),
+				clamp(baseB + low*1.2 + fine),
+				255,
+			})
 		}
 	}
+
 	return img
 }
 
