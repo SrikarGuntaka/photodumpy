@@ -69,6 +69,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/libraries/{id}/quality", s.handleListQuality)
 	mux.HandleFunc("GET /api/libraries/{id}/clusters", s.handleListClusters)
 
+	// The read API proper: a filtered photo listing and a single-photo detail
+	// view. The detail route is rooted at /api/photos rather than nested under
+	// a library, because a photo id is globally unique and the client
+	// following a link from a duplicate group has the photo id but not
+	// necessarily the library it came from.
+	mux.HandleFunc("GET /api/libraries/{id}/photos/search", s.handleListPhotoViews)
+	mux.HandleFunc("GET /api/photos/{id}", s.handleGetPhoto)
+
 	// Job queue (Phase 5). /process enqueues work for the worker pool; the
 	// older /metadata and /hash endpoints still run in-process and are kept
 	// so the pipeline can be exercised without any workers running.

@@ -614,3 +614,87 @@ It was caught by the `max_gap_seconds > 0` CHECK constraint, which is the right
 place for it to be caught and the wrong place to be relying on. The fix
 exports `Options.WithDefaults()` and resolves once, at construction, so the
 values logged and the values stored are the values applied.
+
+---
+
+## 19. The read API's sort key is an allow-list, not a parameter
+
+Every user-supplied value in this codebase is a bind parameter. Sorting is the
+one place that is impossible: `ORDER BY` cannot take a placeholder, so a sort
+key has to reach the query as *text*. That makes it the single most likely
+injection point in a read API, and it is worth being explicit about how it is
+closed.
+
+`sortColumns` is a map from the API's own sort names to fixed SQL expressions.
+A key that is not in the map never reaches the query — the caller's string is
+used only as a map lookup, and an unrecognised one is a 400. Even
+`sort=relative_path`, the real column name, is rejected: the accepted vocabulary
+is the API's, not the schema's, so the column names are not an input surface and
+renaming one is not a breaking change.
+
+Validation happens in two places on purpose. The store's map is the *boundary*
+— it is what makes injection impossible. The HTTP layer's `ValidSort` check is
+about *honesty*: without it a typo would fall through to the default ordering
+and return a plausible page with no indication the sort was ignored.
+
+### Silent no-ops are worse than errors
+
+The same reasoning drives every other filter. A misspelled flag, an
+unparseable date, `to` before `from`, `order=sideways` — all 400. The
+alternative is a caller who sees a believable result set and cannot tell it was
+unfiltered. An error is recoverable; a wrong answer that looks right is not.
+
+The flag vocabulary itself is derived from `quality.AllFlags` rather than
+retyped in the API. The first version *was* retyped, and was wrong on two of
+seven entries within minutes — `shadow_clipping` against the real
+`shadows_clipped` — so the API would have rejected a flag name it prints in its
+own output. A test now drives `flagsFor` through extreme metrics and asserts the
+list covers everything emitted, and that nothing in the list is unreachable.
+
+### LIKE metacharacters are escaped
+
+Path search is `ILIKE '%' || $n || '%'`. The value is bound, so this is not an
+injection risk — but without escaping, `_` is a single-character wildcard and
+`%` matches everything. Searching for `scene0_` would silently return
+`scene01` through `scene09`, and searching for `%` would return the entire
+library while claiming to have filtered. The backslash is escaped first,
+otherwise it would escape the escapes added after it.
+
+### Every ordering ends with the primary key
+
+Three byte-identical copies of a file compare equal on size, on capture time and
+on quality. Rows that tie have no defined order, and Postgres may return them
+differently on each execution — so paging through such a result silently
+repeats some rows and skips others. Appending `photos.id` to every `ORDER BY`
+makes the sort total, which is what makes offset pagination coherent at all.
+
+### NULLS LAST on every nullable sort
+
+Postgres sorts NULLs first under `DESC`. "Worst quality first" would therefore
+open with a page of photos that have no quality score — presenting *not
+measured* as *measured badly*, the same confusion `MarkQualityFailed` exists to
+prevent. Every nullable sort column pins its NULLs to the end.
+
+### One predicate builder feeds the page and the count
+
+`total` is the number of rows matching the filter, and it comes from the same
+`predicate()` call that builds the page query. A count that quietly ignores a
+filter is what makes a UI offer page 7 of a 5-page result. They cannot drift,
+because there is only one of them.
+
+### Memberships are scalar subqueries, not joins
+
+A photo can be in a duplicate group AND a similar group AND a cluster. Joining
+three membership tables would multiply that photo into eight rows, and `LIMIT`
+would then paginate over the multiplied rows rather than over photos — a page
+size of 100 returning 43 distinct photos. Each membership is a single indexed
+lookup on `photo_id` in the select list instead.
+
+### PhotoView is a projection, not a widened domain type
+
+`photos.Photo` is what the ingestion passes read and write, and it stays narrow.
+`store.PhotoView` joins in quality scores, hashes and group memberships that no
+pass needs. Widening the domain type instead would hand every handler fields it
+has no business touching, and the hash columns in particular would then need
+rendering logic — `phash` is stored as a signed int64, because Postgres has no
+unsigned type, and reads as a meaningless negative number until it is hexed.

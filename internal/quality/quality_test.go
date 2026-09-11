@@ -432,3 +432,43 @@ func TestDownscalingReducesSharpness(t *testing.T) {
 		prev, prevName = m.Sharpness, name
 	}
 }
+
+// AllFlags must cover everything flagsFor can emit. The read API validates a
+// caller's flag filter against AllFlags, so a flag missing from that list is
+// one the API rejects even though it appears in its own output.
+//
+// Driven through flagsFor rather than compared against a second hand-written
+// list, which would just move the duplication somewhere else.
+func TestAllFlagsCoversEveryEmittedFlag(t *testing.T) {
+	known := make(map[string]bool, len(AllFlags))
+	for _, f := range AllFlags {
+		known[f] = true
+	}
+
+	// Metrics chosen to trip every branch at once: dark AND bright cannot both
+	// fire, so two passes cover the pair.
+	th := DefaultThresholds()
+	extremes := []Metrics{
+		{Sharpness: 0, MeanLuminance: 0, Contrast: 0, Width: 1, Height: 1,
+			ShadowClipping: 1, HighlightClipping: 1},
+		{Sharpness: 1, MeanLuminance: 255, Contrast: 1, Width: 10000, Height: 10000,
+			ShadowClipping: 0, HighlightClipping: 0},
+	}
+
+	seen := map[string]bool{}
+	for _, m := range extremes {
+		for _, f := range flagsFor(m, th) {
+			seen[f] = true
+			if !known[f] {
+				t.Errorf("flagsFor emitted %q, which is missing from AllFlags", f)
+			}
+		}
+	}
+
+	// And the reverse: a stale entry in AllFlags that nothing can produce.
+	for _, f := range AllFlags {
+		if !seen[f] {
+			t.Errorf("AllFlags lists %q, but no metrics produced it -- stale entry?", f)
+		}
+	}
+}

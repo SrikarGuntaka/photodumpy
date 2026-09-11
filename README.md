@@ -26,8 +26,8 @@ Built in phases, each independently runnable and testable.
 | 6 | Near-duplicate detection (perceptual hashing) | **Done** |
 | 7 | Quality analysis (sharpness, exposure, contrast) | **Done** |
 | 8 | Time + location clustering | **Done** |
-| 9 | Full read API | Next |
-| 10 | React frontend | Planned |
+| 9 | Full read API: filtering, sorting, photo detail | **Done** |
+| 10 | React frontend | Next |
 | 11 | Benchmarks and polish | Planned |
 
 Benchmarks are absent from this README on purpose. They will be added in Phase
@@ -90,6 +90,8 @@ The API is on <http://localhost:8080>:
 | `GET /api/libraries/{id}/quality` | Photos carrying a quality flag, worst first. |
 | `GET /api/libraries/{id}/clusters` | Event timeline grouped by time and location. |
 | `GET /api/libraries/{id}/photos` | Paginated photo list with metadata. |
+| `GET /api/libraries/{id}/photos/search` | Filtered, sorted photo search. |
+| `GET /api/photos/{id}` | One photo, with every group it belongs to. |
 
 ## Scanning a folder
 
@@ -318,6 +320,76 @@ missing/failed = every photo in the library.
 folder stamps every file within a second or two, which would otherwise collapse
 a library into one enormous, confident-looking "event" — visible as Event 1 in
 the sample above.
+
+## Searching the library
+
+```bash
+docker compose exec api photo-organizer find <library-id> -sort quality -limit 5
+```
+
+```
+42 matching, showing 1-5, sorted by quality asc
+
+PATH                                    SIZE        DIMS         QUAL   CAPTURED          MARKS
+scene12-dark.jpg                        52.3 KB     640x480      0.263  2026-03-14 09:00  similar possibly_underexposed
+trip/day1/scene20-bright.jpg            48.2 KB     640x480      0.352  2026-03-14 09:01  similar possibly_overexposed
+trip/scene19-blurry.jpg                 15.8 KB     640x480      0.373  2026-03-14 23:53  gps possibly_blurry
+```
+
+Filters compose: `-q <substring>`, `-flag <quality-flag>`, `-gps true|false`,
+`-from`/`-to` (YYYY-MM-DD), `-sort path|captured_at|file_size|quality|created_at`,
+`-desc`. The HTTP equivalent is
+`GET /api/libraries/{id}/photos/search`, which also accepts `state`,
+`has_duplicates` and `has_similar`.
+
+**Bad input is a 400, never a silent no-op.** An unknown sort key, a misspelled
+flag, or `to` before `from` is rejected with a message. A filter that quietly
+does nothing is worse than an error — the caller sees a plausible result set
+with no way to know it was unfiltered.
+
+**Sort keys are a closed allow-list.** `ORDER BY` cannot take a bind parameter,
+which makes sorting the one place a read API is tempted to interpolate user
+text into SQL. It doesn't: the key is looked up in a map and the caller's
+string never reaches the query. `sort=relative_path` — a real column — is
+rejected too.
+
+**Unmeasured is not zero.** A photo that failed to decode shows `-` for
+quality, not `0.000`. Sorting worst-first puts `NULLS LAST` so a page of
+unanalysed photos cannot masquerade as the worst photos in the library.
+
+**`total` counts what matched the filter**, not the library, so a paginator
+built on it cannot offer pages that do not exist. The count and the page share
+one predicate builder.
+
+## Inspecting one photo
+
+```bash
+docker compose exec api photo-organizer photo <photo-id>
+```
+
+```
+trip/day1/scene02.jpg
+  captured      2026-03-14T10:34:00Z (exif)
+  location      30.26720, -97.74310
+
+  QUALITY (measurements of pixels, not judgements of merit)
+    sharpness   0.340
+    overall     0.506
+
+  sha256        580340268479370d4bde1835a6cb980a482c459a4b591411cf51b6ab5afbbfe8
+  phash         85c9946bd6ac0857
+
+  NEAR-DUPLICATES (3)
+  -> KEEP 61.4 KB   640x480      dist   0  trip/day1/scene02.jpg
+          24.2 KB   640x480      dist   3  trip/day1/scene02-recompressed.jpg
+          17.0 KB   320x240      dist   7  trip/day1/scene02-small.jpg
+```
+
+One request returns everything the pipeline learned about a file plus every
+group it belongs to, with `->` marking the photo you asked about so it stays in
+place among its siblings. The distance column means different things per
+group — Hamming bits for near-duplicates, metres for an event — and exact
+duplicates have none, because they are identical.
 
 ## Testing
 

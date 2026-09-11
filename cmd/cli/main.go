@@ -15,9 +15,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -38,6 +40,8 @@ Commands:
   similar <library-id>   Show near-duplicate groups (suggestions only)
   quality <library-id>   Show photos with technical defects (measurements only)
   clusters <lib-id>      Show the event timeline (time + location grouping)
+  find <library-id>      Search and filter photos (-q -flag -gps -from -to -sort)
+  photo <photo-id>       Everything known about one photo, and its groups
   queue <library-id>     Enqueue the pipeline as jobs for the worker pool
   jobs <library-id>      Show queue state
   workers                Show the worker fleet
@@ -93,6 +97,12 @@ func run(args []string, out io.Writer) error {
 	offset := fs.Int("offset", 0, "page offset for 'photos'")
 	flag_ := fs.String("flag", "", "filter 'quality' to one flag, e.g. possibly_blurry")
 	flag := flag_
+	search := fs.String("q", "", "substring match on the relative path, for 'find'")
+	sortBy := fs.String("sort", "", "sort for 'find': path, captured_at, file_size, quality, created_at")
+	desc := fs.Bool("desc", false, "reverse the 'find' sort")
+	hasGPS := fs.String("gps", "", "filter 'find' by GPS presence: true or false")
+	fromDate := fs.String("from", "", "earliest capture date for 'find' (YYYY-MM-DD)")
+	toDate := fs.String("to", "", "latest capture date for 'find' (YYYY-MM-DD)")
 
 	positional, err := parseInterleaved(fs, args)
 	if err != nil {
@@ -151,6 +161,20 @@ func run(args []string, out io.Writer) error {
 			return errors.New("clusters requires a library id: photo-organizer clusters <library-id>")
 		}
 		return cmdClusters(ctx, c, out, rest[0], *limit, *offset)
+	case "find":
+		if len(rest) < 1 {
+			return errors.New("find requires a library id: photo-organizer find <library-id> [-q text] [-flag f] [-sort k]")
+		}
+		return cmdFind(ctx, c, out, rest[0], findOptions{
+			Query: *search, Flag: *flag, Sort: *sortBy, Desc: *desc,
+			HasGPS: *hasGPS, From: *fromDate, To: *toDate,
+			Limit: *limit, Offset: *offset,
+		})
+	case "photo":
+		if len(rest) < 1 {
+			return errors.New("photo requires a photo id: photo-organizer photo <photo-id>")
+		}
+		return cmdPhoto(ctx, c, out, rest[0])
 	case "queue":
 		if len(rest) < 1 {
 			return errors.New("queue requires a library id: photo-organizer queue <library-id>")
@@ -960,6 +984,291 @@ func cmdClusters(ctx context.Context, c *client, out io.Writer, libraryID string
 	fmt.Fprintln(out, "Photos without GPS join on time alone; distance is measured from the event's first fix.")
 	fmt.Fprintln(out, "Nothing has been modified, moved or deleted.")
 	return nil
+}
+
+// photoView mirrors the API's read model. Only the fields the CLI renders are
+// declared; unknown JSON fields are ignored, so the API can grow without
+// breaking an older client.
+type photoView struct {
+	ID               string   `json:"id"`
+	RelativePath     string   `json:"relative_path"`
+	OriginalFilename string   `json:"original_filename"`
+	FileSizeBytes    int64    `json:"file_size_bytes"`
+	DetectedFormat   string   `json:"detected_format"`
+	State            string   `json:"state"`
+	Width            *int     `json:"width"`
+	Height           *int     `json:"height"`
+	CameraMake       *string  `json:"camera_make"`
+	CameraModel      *string  `json:"camera_model"`
+	CapturedAt       *string  `json:"captured_at"`
+	CapturedAtSource *string  `json:"captured_at_source"`
+	Latitude         *float64 `json:"latitude"`
+	Longitude        *float64 `json:"longitude"`
+	Sharpness        *float64 `json:"sharpness"`
+	Exposure         *float64 `json:"exposure"`
+	Contrast         *float64 `json:"contrast"`
+	Resolution       *float64 `json:"resolution"`
+	QualityScore     *float64 `json:"quality_score"`
+	QualityFlags     []string `json:"quality_flags"`
+	SHA256           *string  `json:"sha256"`
+	PHash            *string  `json:"phash"`
+	DuplicateGroupID *string  `json:"duplicate_group_id"`
+	SimilarGroupID   *string  `json:"similar_group_id"`
+	ClusterID        *string  `json:"cluster_id"`
+	LastError        *string  `json:"last_error"`
+}
+
+type findResponse struct {
+	Photos []photoView `json:"photos"`
+	Total  int         `json:"total"`
+	Limit  int         `json:"limit"`
+	Offset int         `json:"offset"`
+	Sort   string      `json:"sort"`
+	Order  string      `json:"order"`
+}
+
+type relatedPhoto struct {
+	PhotoID       string   `json:"photo_id"`
+	RelativePath  string   `json:"relative_path"`
+	FileSizeBytes int64    `json:"file_size_bytes"`
+	Width         *int     `json:"width"`
+	Height        *int     `json:"height"`
+	QualityScore  *float64 `json:"quality_score"`
+	Distance      *float64 `json:"distance"`
+	SuggestedKeep bool     `json:"suggested_keep"`
+	IsSelf        bool     `json:"is_self"`
+}
+
+type photoDetailResponse struct {
+	Photo     photoView `json:"photo"`
+	Relations struct {
+		Duplicates []relatedPhoto `json:"duplicates"`
+		Similar    []relatedPhoto `json:"similar"`
+		Cluster    []relatedPhoto `json:"cluster"`
+	} `json:"relations"`
+}
+
+type findOptions struct {
+	Query, Flag, Sort, HasGPS, From, To string
+	Desc                                bool
+	Limit, Offset                       int
+}
+
+// query renders the options as a URL query string, omitting anything unset so
+// the server sees no filter rather than an empty one.
+func (o findOptions) query() string {
+	v := url.Values{}
+	v.Set("limit", strconv.Itoa(o.Limit))
+	v.Set("offset", strconv.Itoa(o.Offset))
+	for key, val := range map[string]string{
+		"q": o.Query, "flag": o.Flag, "sort": o.Sort,
+		"has_gps": o.HasGPS, "from": o.From, "to": o.To,
+	} {
+		if val != "" {
+			v.Set(key, val)
+		}
+	}
+	if o.Desc {
+		v.Set("order", "desc")
+	}
+	return v.Encode()
+}
+
+// dims renders a resolution, or "-" when metadata extraction has not run.
+func dims(w, h *int) string {
+	if w == nil || h == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%dx%d", *w, *h)
+}
+
+// score renders a 0..1 measurement. An unmeasured photo shows "-", never 0.00:
+// a fabricated zero would sort and read as the worst photo in the library
+// rather than an unanalysed one.
+func score(f *float64) string {
+	if f == nil {
+		return "  -  "
+	}
+	return fmt.Sprintf("%5.3f", *f)
+}
+
+func cmdFind(ctx context.Context, c *client, out io.Writer, libraryID string, opts findOptions) error {
+	var resp findResponse
+	path := fmt.Sprintf("/api/libraries/%s/photos/search?%s", libraryID, opts.query())
+	if _, err := c.get(ctx, path, &resp); err != nil {
+		return err
+	}
+
+	shown := len(resp.Photos)
+	fmt.Fprintf(out, "%d matching, showing %d-%d, sorted by %s %s\n\n",
+		resp.Total, resp.Offset+1, resp.Offset+shown, resp.Sort, resp.Order)
+	if shown == 0 {
+		fmt.Fprintln(out, "Nothing matched that filter.")
+		return nil
+	}
+
+	fmt.Fprintf(out, "%-38s  %-10s  %-11s  %-5s  %-16s  %s\n",
+		"PATH", "SIZE", "DIMS", "QUAL", "CAPTURED", "MARKS")
+	for _, p := range resp.Photos {
+		captured := "-"
+		if p.CapturedAt != nil {
+			if t, err := time.Parse(time.RFC3339, *p.CapturedAt); err == nil {
+				captured = t.Format("2006-01-02 15:04")
+			}
+		}
+		// Source matters: an F date was guessed from the file's mtime, not
+		// recorded by the camera, and must stay visually distinct from one
+		// that was.
+		if p.CapturedAtSource != nil && *p.CapturedAtSource == "filesystem" {
+			captured += " F"
+		}
+
+		marks := []string{}
+		if p.DuplicateGroupID != nil {
+			marks = append(marks, "dup")
+		}
+		if p.SimilarGroupID != nil {
+			marks = append(marks, "similar")
+		}
+		if p.Latitude != nil {
+			marks = append(marks, "gps")
+		}
+		marks = append(marks, p.QualityFlags...)
+
+		fmt.Fprintf(out, "%-38s  %-10s  %-11s  %s  %-16s  %s\n",
+			truncatePath(p.RelativePath, 38), humanBytes(p.FileSizeBytes),
+			dims(p.Width, p.Height), score(p.QualityScore), captured,
+			strings.Join(marks, " "))
+	}
+
+	if resp.Offset+shown < resp.Total {
+		fmt.Fprintf(out, "\n%d more. Next page: -offset %d\n",
+			resp.Total-(resp.Offset+shown), resp.Offset+shown)
+	}
+	return nil
+}
+
+// truncatePath shortens from the LEFT, keeping the filename visible. Paths
+// share long directory prefixes and differ at the end, so trimming the tail
+// would leave a column of identical strings.
+func truncatePath(p string, max int) string {
+	if len(p) <= max {
+		return p
+	}
+	return "..." + p[len(p)-(max-3):]
+}
+
+func cmdPhoto(ctx context.Context, c *client, out io.Writer, photoID string) error {
+	var resp photoDetailResponse
+	if _, err := c.get(ctx, "/api/photos/"+photoID, &resp); err != nil {
+		return err
+	}
+	p := resp.Photo
+
+	fmt.Fprintf(out, "%s\n", p.RelativePath)
+	fmt.Fprintf(out, "  id            %s\n", p.ID)
+	fmt.Fprintf(out, "  size          %s (%d bytes)\n", humanBytes(p.FileSizeBytes), p.FileSizeBytes)
+	fmt.Fprintf(out, "  format        %s\n", p.DetectedFormat)
+	fmt.Fprintf(out, "  dimensions    %s\n", dims(p.Width, p.Height))
+	fmt.Fprintf(out, "  state         %s\n", p.State)
+
+	if p.CapturedAt != nil {
+		src := ""
+		if p.CapturedAtSource != nil {
+			src = " (" + *p.CapturedAtSource + ")"
+		}
+		fmt.Fprintf(out, "  captured      %s%s\n", *p.CapturedAt, src)
+	} else {
+		fmt.Fprintf(out, "  captured      unknown -- no EXIF date and no usable mtime\n")
+	}
+
+	if p.Latitude != nil && p.Longitude != nil {
+		fmt.Fprintf(out, "  location      %.5f, %.5f\n", *p.Latitude, *p.Longitude)
+	} else {
+		fmt.Fprintf(out, "  location      none recorded\n")
+	}
+	if p.CameraMake != nil || p.CameraModel != nil {
+		fmt.Fprintf(out, "  camera        %s %s\n", deref(p.CameraMake), deref(p.CameraModel))
+	}
+
+	fmt.Fprintf(out, "\n  QUALITY (measurements of pixels, not judgements of merit)\n")
+	fmt.Fprintf(out, "    sharpness   %s\n", score(p.Sharpness))
+	fmt.Fprintf(out, "    exposure    %s\n", score(p.Exposure))
+	fmt.Fprintf(out, "    contrast    %s\n", score(p.Contrast))
+	fmt.Fprintf(out, "    resolution  %s\n", score(p.Resolution))
+	fmt.Fprintf(out, "    overall     %s\n", score(p.QualityScore))
+	if len(p.QualityFlags) > 0 {
+		fmt.Fprintf(out, "    flags       %s\n", strings.Join(p.QualityFlags, ", "))
+	}
+
+	if p.SHA256 != nil {
+		fmt.Fprintf(out, "\n  sha256        %s\n", *p.SHA256)
+	}
+	if p.PHash != nil {
+		fmt.Fprintf(out, "  phash         %s\n", *p.PHash)
+	}
+	if p.LastError != nil {
+		fmt.Fprintf(out, "  last error    %s\n", *p.LastError)
+	}
+
+	printRelated(out, "EXACT DUPLICATES", resp.Relations.Duplicates, "")
+	printRelated(out, "NEAR-DUPLICATES", resp.Relations.Similar, "dist")
+	printRelated(out, "SAME EVENT", resp.Relations.Cluster, "m")
+
+	if len(resp.Relations.Duplicates) > 0 || len(resp.Relations.Similar) > 0 {
+		fmt.Fprintln(out, "\nKEEP marks a suggestion. Nothing has been modified, moved or deleted.")
+	}
+	return nil
+}
+
+// printRelated renders one group of siblings. unit labels the distance column,
+// which means different things per group -- Hamming bits for near-duplicates,
+// metres for an event -- and nothing for exact duplicates, which are
+// identical and have no distance between them.
+func printRelated(out io.Writer, title string, members []relatedPhoto, unit string) {
+	// A group of one is just the photo itself; there is nothing to relate it
+	// to, so the heading would be noise.
+	if len(members) < 2 {
+		return
+	}
+
+	fmt.Fprintf(out, "\n  %s (%d)\n", title, len(members))
+	for _, m := range members {
+		marker := "   "
+		if m.IsSelf {
+			marker = "-> "
+		}
+		label := "     "
+		if m.SuggestedKeep {
+			label = "KEEP "
+		}
+		// The distance column keeps its width even when a member has no
+		// distance -- a cluster sibling with no GPS fix, for instance. Letting
+		// it collapse would shift every following column on that row and break
+		// the alignment of the list.
+		dist := ""
+		switch {
+		case unit == "":
+			// Exact duplicates: identical, so there is no distance for any
+			// member and the column is omitted entirely rather than blanked.
+		case m.Distance == nil:
+			dist = strings.Repeat(" ", 8)
+		case unit == "m":
+			dist = fmt.Sprintf("  %6s", humanMeters(*m.Distance))
+		default:
+			dist = fmt.Sprintf("  %s %3.0f", unit, *m.Distance)
+		}
+		fmt.Fprintf(out, "  %s%s%-9s %-11s%s  %s\n",
+			marker, label, humanBytes(m.FileSizeBytes), dims(m.Width, m.Height),
+			dist, m.RelativePath)
+	}
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // cmdQueue enqueues the pipeline as jobs and optionally watches it drain.

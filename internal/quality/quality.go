@@ -117,6 +117,22 @@ const (
 	FlagHighlightsClipped    = "highlights_clipped"
 )
 
+// AllFlags is every flag this package can raise.
+//
+// Exported so callers that need to validate a flag name -- the read API's
+// filter, for one -- derive the set from here instead of retyping it. A
+// hand-copied duplicate of this list was wrong on two of seven entries the
+// first time it was written.
+var AllFlags = []string{
+	FlagPossiblyBlurry,
+	FlagPossiblyUnderexposed,
+	FlagPossiblyOverexposed,
+	FlagPossiblyLowContrast,
+	FlagLowResolution,
+	FlagShadowsClipped,
+	FlagHighlightsClipped,
+}
+
 // Thresholds are the configurable cut-offs at which a flag is raised.
 //
 // Every one of these is a judgement call rather than a fact about images,
