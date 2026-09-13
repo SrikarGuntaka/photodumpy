@@ -61,6 +61,12 @@ type PhotoView struct {
 	SimilarGroupID   *string `json:"similar_group_id,omitempty"`
 	ClusterID        *string `json:"cluster_id,omitempty"`
 
+	// Thumbnail dimensions, oriented upright. Present only when a thumbnail
+	// exists, so a UI can reserve each grid tile's space before the image
+	// loads -- and render "no preview" rather than a broken image when absent.
+	ThumbnailWidth  *int `json:"thumbnail_width,omitempty"`
+	ThumbnailHeight *int `json:"thumbnail_height,omitempty"`
+
 	LastError *string `json:"last_error,omitempty"`
 }
 
@@ -249,6 +255,7 @@ const photoViewColumns = `
 	(SELECT group_id::text FROM duplicate_group_members m WHERE m.photo_id = photos.id LIMIT 1),
 	(SELECT group_id::text FROM similar_group_members    m WHERE m.photo_id = photos.id LIMIT 1),
 	(SELECT cluster_id::text FROM cluster_members        m WHERE m.photo_id = photos.id LIMIT 1),
+	photos.thumbnail_width, photos.thumbnail_height,
 	photos.last_error`
 
 func scanPhotoView(row interface{ Scan(...any) error }) (PhotoView, error) {
@@ -271,6 +278,7 @@ func scanPhotoView(row interface{ Scan(...any) error }) (PhotoView, error) {
 		&v.Resolution, &v.QualityScore, &flags,
 		&sha256Hex, &phashHex,
 		&v.DuplicateGroupID, &v.SimilarGroupID, &v.ClusterID,
+		&v.ThumbnailWidth, &v.ThumbnailHeight,
 		&v.LastError,
 	)
 	if err != nil {

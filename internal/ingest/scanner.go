@@ -258,6 +258,7 @@ func (s *Scanner) EnqueuePhotoJobs(ctx context.Context, libraryID string) (int, 
 		{jobs.TypeComputeFileHash, s.store.ListPhotoIDsNeedingHash},
 		{jobs.TypeComputePerceptualHash, s.store.ListPhotoIDsNeedingPHash},
 		{jobs.TypeAnalyzeQuality, s.store.ListPhotoIDsNeedingQuality},
+		{jobs.TypeGenerateThumbnail, s.store.ListPhotoIDsNeedingThumbnail},
 	} {
 		cursor := ""
 		for {

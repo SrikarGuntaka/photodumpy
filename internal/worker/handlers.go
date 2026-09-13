@@ -82,6 +82,7 @@ func (h *Handlers) RegisterAll(w *Worker) {
 	w.Register(jobs.TypeComputeFileHash, h.ComputeFileHash)
 	w.Register(jobs.TypeComputePerceptualHash, h.ComputePerceptualHash)
 	w.Register(jobs.TypeAnalyzeQuality, h.AnalyzeQuality)
+	w.Register(jobs.TypeGenerateThumbnail, h.GenerateThumbnail)
 	w.Register(jobs.TypeBuildDuplicateGroups, h.BuildDuplicateGroups)
 	w.Register(jobs.TypeBuildSimilarGroups, h.BuildSimilarGroups)
 	w.Register(jobs.TypeBuildClusters, h.BuildClusters)
@@ -201,6 +202,38 @@ func (h *Handlers) AnalyzeQuality(ctx context.Context, job jobs.Job) error {
 		ID:           photo.ID,
 		RelativePath: photo.RelativePath,
 	})
+}
+
+// GenerateThumbnail handles one GENERATE_THUMBNAIL job.
+//
+// No prerequisite, unlike the aggregate stages: the thumbnail pass reads
+// orientation from the file itself, so it can run in any order relative to
+// metadata extraction. See Processor.ThumbnailOne.
+func (h *Handlers) GenerateThumbnail(ctx context.Context, job jobs.Job) error {
+	lib, err := h.store.GetLibrary(ctx, job.LibraryID)
+	if err != nil {
+		return h.libraryError(err)
+	}
+
+	photo, err := h.store.GetPhoto(ctx, job.TargetID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return jobs.Permanent(fmt.Errorf("photo %s no longer exists", job.TargetID))
+		}
+		return fmt.Errorf("loading photo: %w", err)
+	}
+
+	err = h.processor.ThumbnailOne(ctx, lib.RootPath, store.PhotoNeedingThumbnail{
+		ID:           photo.ID,
+		RelativePath: photo.RelativePath,
+	})
+	// A worker started without a thumbnail directory is misconfigured, and no
+	// number of retries will fix that. Burning five attempts per photo would
+	// bury the one real message under thousands of identical failures.
+	if errors.Is(err, ingest.ErrNoThumbnailDir) {
+		return jobs.Permanent(err)
+	}
+	return err
 }
 
 // BuildSimilarGroups handles the near-duplicate aggregate stage.

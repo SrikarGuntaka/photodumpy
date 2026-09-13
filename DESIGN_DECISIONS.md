@@ -698,3 +698,101 @@ pass needs. Widening the domain type instead would hand every handler fields it
 has no business touching, and the hash columns in particular would then need
 rendering logic — `phash` is stored as a signed int64, because Postgres has no
 unsigned type, and reads as a meaningless negative number until it is hexed.
+
+---
+
+## 20. Thumbnails: the only image data this application writes
+
+### Orientation is read from the file, not from the metadata row
+
+Neither `image/jpeg` nor `x/image` applies EXIF orientation on decode, so a
+phone photo held upright decodes lying on its side. Getting this wrong puts
+every portrait photo in the grid at 90 degrees — the most visible bug a photo
+tool can have.
+
+The photos row already has an `orientation` column, written by
+`EXTRACT_METADATA`. Using it would make thumbnail generation depend on that job
+having finished, and both ways of expressing that dependency are bad:
+
+- **Defer until metadata is done.** If the metadata job dies, `metadata_extracted_at`
+  stays NULL forever and the thumbnail job defers forever. `Defer` does not
+  consume attempts, so nothing would ever kill it.
+- **Don't wait.** Whenever the thumbnail job wins the race, it renders sideways
+  and marks itself done, and nothing revisits it.
+
+Instead `thumbnail.FromReader` re-reads orientation from the file handle it has
+already opened. A few KB of EXIF parsing is far cheaper than cross-job
+coordination, and the thumbnail becomes a function of the file alone — it can
+run in any order, on any worker, with no prerequisite.
+
+The test for this does not trust the pixel arithmetic alone. It builds a JPEG,
+splices in a hand-written EXIF APP1 segment carrying orientation 6, and checks
+that the real extractor's reading of it turns a 60×20 image into a 20×60 one
+with its marker in the right corner. The EXIF bytes are hand-built rather than
+produced by a library, so a bug shared between writer and reader cannot cancel
+itself out.
+
+### Filenames come from the photo id and nothing else
+
+`PathFor` accepts only a canonical lowercase UUID. A string matching
+`^[0-9a-f]{8}-…-[0-9a-f]{12}$` contains no separator, no dot and no drive
+letter, so no value that passes can name anything outside the thumbnail
+directory. There is no traversal check to get subtly wrong, because there is
+nothing to traverse with.
+
+The photo's own filename is never involved. It comes from the user's disk, can
+contain anything the filesystem permits, and two photos in different folders
+routinely share one.
+
+The API lowercases the id before calling `PathFor`. UUIDs are case-insensitive
+on input and Postgres treats them that way, so without it an uppercase id served
+the original but 404'd the thumbnail for the same photo. Changing letter case
+cannot introduce a separator, and the result is still validated.
+
+### Writes are atomic
+
+Encode to a temp file in the same directory, `fsync`, rename into place. A
+worker killed mid-write — the exact crash the queue is built to survive — would
+otherwise leave a truncated JPEG that the API serves indefinitely. The temp file
+sits beside the target rather than in `/tmp` because rename is only atomic
+within one filesystem, and in Docker those are different mounts. The sync
+happens before the rename because the directory entry can reach disk before
+the data does, and a power loss would leave a correctly-named empty file.
+
+### Rendering order: flatten, scale, orient
+
+- **Flatten before scaling.** JPEG has no alpha; a transparent pixel encodes as
+  black. Flattening after scaling is too late — resampling has already blended
+  the black premultiplied colour into opaque neighbours, leaving a dark fringe.
+  Background is light grey rather than white so it doesn't glare in a dark UI.
+- **Orient after scaling.** Rotation is a pixel permutation, so it costs the same
+  at any size. Doing it on the 400px result instead of a 12MP decode is hundreds
+  of times less work, and long-edge scaling is symmetric so the order does not
+  change the output.
+- **Never upscale.** A 240px image stays 240px; enlarging it invents nothing.
+
+### The API cannot write thumbnails
+
+Workers generate thumbnails; the API only serves them. The thumbnail volume is
+mounted `:ro` on the API container, so the process facing HTTP has no write
+access to image data anywhere — verified by attempting a write inside the
+container, which the kernel refuses.
+
+### Serving bytes safely
+
+Every media endpoint takes a photo id and never a path. For originals the path
+is rebuilt from database rows and containment is re-checked **on every
+request**, twice: the library root must still be inside `PHOTO_ROOT` (which is
+configuration and may have narrowed), and the file must resolve inside the root
+after symlinks are evaluated (a symlink created after the scan could point
+anywhere). Non-regular files are refused, since serving a FIFO would block the
+handler until the write timeout.
+
+Content-Type comes from an allow-list of raster formats, never from the file's
+extension — `ServeContent` is called with an empty name so a photo named
+`x.html` cannot be served as HTML. Every response carries `nosniff`, a
+`default-src 'none'; sandbox` CSP, and `Cache-Control: private`.
+
+Thumbnails carry a strong ETag built from the photo id and the generation
+timestamp, so revisiting a grid costs a 304 per tile and a regenerated thumbnail
+is picked up immediately.

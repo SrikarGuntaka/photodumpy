@@ -25,6 +25,7 @@ const (
 	TypeComputeFileHash       Type = "COMPUTE_FILE_HASH"
 	TypeComputePerceptualHash Type = "COMPUTE_PERCEPTUAL_HASH"
 	TypeAnalyzeQuality        Type = "ANALYZE_QUALITY"
+	TypeGenerateThumbnail     Type = "GENERATE_THUMBNAIL"
 
 	// Aggregate stages. One per library, needing a global view.
 	TypeBuildDuplicateGroups Type = "BUILD_DUPLICATE_GROUPS"

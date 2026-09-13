@@ -92,6 +92,8 @@ The API is on <http://localhost:8080>:
 | `GET /api/libraries/{id}/photos` | Paginated photo list with metadata. |
 | `GET /api/libraries/{id}/photos/search` | Filtered, sorted photo search. |
 | `GET /api/photos/{id}` | One photo, with every group it belongs to. |
+| `GET /api/photos/{id}/thumbnail` | 400px oriented JPEG preview. ETag-validated. |
+| `GET /api/photos/{id}/original` | The original file, read-only, with containment re-checked per request. |
 
 ## Scanning a folder
 

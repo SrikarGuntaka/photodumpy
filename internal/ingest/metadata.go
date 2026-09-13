@@ -146,6 +146,10 @@ type Processor struct {
 	// constants, because every one of them is a judgement call.
 	thresholds quality.Thresholds
 
+	// thumbnailDir is where thumbnails are written. Empty in processes that
+	// never generate them -- the API, which only reads.
+	thumbnailDir string
+
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
 	wg      sync.WaitGroup
@@ -160,6 +164,10 @@ type ProcessorOptions struct {
 	// QualityThresholds override the calibrated defaults. The zero value uses
 	// quality.DefaultThresholds().
 	QualityThresholds *quality.Thresholds
+
+	// ThumbnailDir is the directory thumbnails are written to. It must not be
+	// inside any photo library.
+	ThumbnailDir string
 }
 
 func NewProcessor(st *store.Store, log *slog.Logger, opts ProcessorOptions) *Processor {
@@ -176,11 +184,12 @@ func NewProcessor(st *store.Store, log *slog.Logger, opts ProcessorOptions) *Pro
 	}
 
 	return &Processor{
-		store:       st,
-		log:         log,
-		concurrency: c,
-		thresholds:  th,
-		running:     make(map[string]context.CancelFunc),
+		store:        st,
+		log:          log,
+		concurrency:  c,
+		thresholds:   th,
+		thumbnailDir: opts.ThumbnailDir,
+		running:      make(map[string]context.CancelFunc),
 	}
 }
 

@@ -76,6 +76,8 @@ func (s *Server) Handler() http.Handler {
 	// necessarily the library it came from.
 	mux.HandleFunc("GET /api/libraries/{id}/photos/search", s.handleListPhotoViews)
 	mux.HandleFunc("GET /api/photos/{id}", s.handleGetPhoto)
+	mux.HandleFunc("GET /api/photos/{id}/thumbnail", s.handleGetThumbnail)
+	mux.HandleFunc("GET /api/photos/{id}/original", s.handleGetOriginal)
 
 	// Job queue (Phase 5). /process enqueues work for the worker pool; the
 	// older /metadata and /hash endpoints still run in-process and are kept

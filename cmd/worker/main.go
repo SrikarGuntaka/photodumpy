@@ -64,7 +64,10 @@ func run() error {
 	// workers cannot cause a migration stampede.
 
 	st := store.New(pool)
-	processor := ingest.NewProcessor(st, log, ingest.ProcessorOptions{Concurrency: concurrency})
+	processor := ingest.NewProcessor(st, log, ingest.ProcessorOptions{
+		Concurrency:  concurrency,
+		ThumbnailDir: cfg.ThumbnailDir,
+	})
 
 	w := worker.New(st, log, worker.Options{
 		Concurrency:   concurrency,

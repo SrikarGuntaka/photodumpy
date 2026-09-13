@@ -61,7 +61,10 @@ services:
       # READ-ONLY. This is the enforcement point for "never modify, move or
       # delete original photos": even a bug cannot write here.
       - ${HOST_PHOTOS_DIR:-./sample-photos}:/photos:ro
-      - thumbnails:/var/lib/photo-organizer/thumbnails
+      # Also read-only for the API. Workers generate thumbnails; the API only
+      # serves them, and the process that faces HTTP has no reason to be able
+      # to write image data anywhere.
+      - thumbnails:/var/lib/photo-organizer/thumbnails:ro
     depends_on:
       postgres:
         condition: service_healthy
