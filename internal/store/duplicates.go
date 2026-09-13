@@ -81,6 +81,21 @@ func (s *Store) CountPhotosNeedingHash(ctx context.Context, libraryID string) (i
 	return n, nil
 }
 
+// exactKeeperOrder ranks byte-identical copies of one file, best first. It is
+// an ORDER BY fragment over a photos row aliased "p".
+//
+// Shared by two queries that MUST agree: the exact-duplicate rebuild, which
+// picks the suggested keeper from it, and the similarity candidate load, which
+// uses the same copy to stand in for its duplicates. If they ranked
+// differently, the Review screen's two tabs would recommend keeping different
+// copies of the same bytes. It stays in SQL, rather than being reimplemented in
+// Go, because the final tiebreak compares paths under the database's collation
+// -- and a Go string comparison can order two paths the other way.
+const exactKeeperOrder = `
+	(length(p.relative_path) - length(replace(p.relative_path, '/', ''))) ASC,
+	length(p.relative_path) ASC,
+	p.relative_path ASC`
+
 // RebuildDuplicateGroups recomputes every exact-duplicate group for a library.
 //
 // This is the AGGREGATE stage described in ARCHITECTURE.md: it needs a global
@@ -152,10 +167,7 @@ func (s *Store) RebuildDuplicateGroups(ctx context.Context, libraryID string) (g
 			       p.id,
 			       row_number() OVER (
 			           PARTITION BY p.sha256
-			           ORDER BY (length(p.relative_path)
-			                     - length(replace(p.relative_path, '/', ''))) ASC,
-			                    length(p.relative_path) ASC,
-			                    p.relative_path ASC
+			           ORDER BY ` + exactKeeperOrder + `
 			       ) AS rank
 			FROM photos p
 			JOIN dupes d ON d.sha256 = p.sha256

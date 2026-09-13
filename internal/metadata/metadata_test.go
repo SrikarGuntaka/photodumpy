@@ -165,6 +165,17 @@ func TestMissingGPSIsNotAnError(t *testing.T) {
 		if got.CapturedAt == nil {
 			t.Errorf("%s: lost the timestamp while handling absent GPS", f.RelPath)
 		}
+		// Not an error, and not a WARNING either. Warnings are persisted to
+		// last_error and shown to the user in red; a photo that simply has no
+		// GPS block must produce none.
+		//
+		// Regression: absence was detected by matching the error text for "not
+		// found", but goexif says "is not present". The match never succeeded,
+		// so every photo with EXIF but no GPS was stored with a spurious
+		// "gps unreadable" warning -- found when the detail panel displayed it.
+		if len(got.Warnings) > 0 {
+			t.Errorf("%s: absent GPS produced warnings %q", f.RelPath, got.Warnings)
+		}
 		checked++
 	}
 	if checked == 0 {

@@ -114,13 +114,42 @@ func (s *Store) CountPhotosNeedingPHash(ctx context.Context, libraryID string) (
 // happen to fall inside a page. At 100,000 photos this is roughly 6MB of
 // candidate structs, which is a reasonable price for correctness.
 func (s *Store) LoadSimilarityCandidates(ctx context.Context, libraryID string) ([]duplicates.Candidate, error) {
+	// ONE CANDIDATE PER DISTINCT FILE. Byte-identical copies are collapsed to a
+	// single representative before similarity grouping ever sees them.
+	//
+	// Without this, three copies of one file hash to distance 0 from each other
+	// and form their own "near-duplicate" group -- a group the UI then describes
+	// as "visually similar but not identical", which is false. Worse, its
+	// reclaimable bytes were ALSO counted by the exact-duplicate group for the
+	// same files, so the two review tabs double-counted the same space. On the
+	// fixture corpus the API reported 9 near-duplicate groups where the
+	// generator built 6; the other 3 were the exact-duplicate groups again.
+	//
+	// Exact copies are the exact-duplicate pipeline's job. This pipeline
+	// compares distinct images.
+	//
+	// The representative is the copy exactKeeperOrder ranks first -- the same
+	// copy the exact-duplicate group suggests keeping -- so when a duplicated
+	// file also has, say, a resized variant, the near-duplicate group shows the
+	// copy the user was already told to keep.
+	//
+	// Photos with no sha256 each form their own partition (the CASE yields their
+	// unique id), so a file whose hashing failed is never merged with another.
 	const q = `
 		SELECT id, phash, COALESCE(width, 0), COALESCE(height, 0), file_size_bytes,
 		       relative_path, quality_score
-		FROM photos
-		WHERE library_id = $1
-		  AND phash IS NOT NULL
-		  AND state <> 'missing'
+		FROM (
+			SELECT p.*,
+			       row_number() OVER (
+			           PARTITION BY p.sha256, CASE WHEN p.sha256 IS NULL THEN p.id END
+			           ORDER BY ` + exactKeeperOrder + `
+			       ) AS copy_rank
+			FROM photos p
+			WHERE p.library_id = $1
+			  AND p.phash IS NOT NULL
+			  AND p.state <> 'missing'
+		) p
+		WHERE copy_rank = 1
 		ORDER BY id`
 
 	rows, err := s.pool.Query(ctx, q, libraryID)
@@ -253,6 +282,10 @@ type SimilarMember struct {
 	FileSizeBytes int64  `json:"file_size_bytes"`
 	Width         *int   `json:"width,omitempty"`
 	Height        *int   `json:"height,omitempty"`
+	// QualityScore is the measured quality, or absent when unmeasured. It is
+	// the FIRST criterion in the keep-ranking, so without it a review screen
+	// could show which photo was suggested but not why.
+	QualityScore *float64 `json:"quality_score,omitempty"`
 	// Distance from the suggested-keep photo, in bits out of 64.
 	Distance      int  `json:"distance"`
 	Rank          int  `json:"rank"`
@@ -308,7 +341,7 @@ func (s *Store) ListSimilarGroups(ctx context.Context, libraryID string, limit, 
 
 	const memberQ = `
 		SELECT m.group_id, p.id, p.relative_path, p.file_size_bytes,
-		       p.width, p.height, m.distance, m.rank
+		       p.width, p.height, p.quality_score, m.distance, m.rank
 		FROM similar_group_members m
 		JOIN photos p ON p.id = m.photo_id
 		WHERE m.group_id = ANY($1)
@@ -324,7 +357,7 @@ func (s *Store) ListSimilarGroups(ctx context.Context, libraryID string, limit, 
 		var groupID string
 		var m SimilarMember
 		if err := mrows.Scan(&groupID, &m.PhotoID, &m.RelativePath, &m.FileSizeBytes,
-			&m.Width, &m.Height, &m.Distance, &m.Rank); err != nil {
+			&m.Width, &m.Height, &m.QualityScore, &m.Distance, &m.Rank); err != nil {
 			return nil, fmt.Errorf("store: scanning similar member: %w", err)
 		}
 		i, ok := index[groupID]

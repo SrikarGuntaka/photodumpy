@@ -242,11 +242,17 @@ func (h *Handlers) GenerateThumbnail(ctx context.Context, job jobs.Job) error {
 // while the perceptual hashing it depends on is still outstanding, because
 // grouping over a partially-hashed library produces a confident wrong answer.
 func (h *Handlers) BuildSimilarGroups(ctx context.Context, job jobs.Job) error {
-	// Two prerequisites, not one. Perceptual hashes decide MEMBERSHIP; quality
-	// scores decide which member to suggest keeping. Running before quality
-	// lands would produce correct groups with a worse recommendation, and
-	// nothing would revisit it.
-	for _, prereq := range []jobs.Type{jobs.TypeComputePerceptualHash, jobs.TypeAnalyzeQuality} {
+	// Three prerequisites. Perceptual hashes decide MEMBERSHIP; quality scores
+	// decide which member to suggest keeping; and file hashes decide which
+	// photos are byte-identical copies, which are collapsed to one candidate
+	// before grouping (see LoadSimilarityCandidates). Running before the file
+	// hashes land would leave some copies uncollapsed, so the result would
+	// depend on job timing -- and nothing would revisit it.
+	for _, prereq := range []jobs.Type{
+		jobs.TypeComputeFileHash,
+		jobs.TypeComputePerceptualHash,
+		jobs.TypeAnalyzeQuality,
+	} {
 		outstanding, err := h.store.CountOutstandingJobsOfType(ctx, job.LibraryID, prereq)
 		if err != nil {
 			return fmt.Errorf("checking %s progress: %w", prereq, err)

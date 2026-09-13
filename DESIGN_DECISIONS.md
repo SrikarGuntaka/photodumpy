@@ -796,3 +796,73 @@ extension — `ServeContent` is called with an empty name so a photo named
 Thumbnails carry a strong ETag built from the photo id and the generation
 timestamp, so revisiting a grid costs a 304 per tile and a regenerated thumbnail
 is picked up immediately.
+
+---
+
+## 21. Two bugs that terminal output hid and a UI made obvious
+
+Both shipped in earlier phases with passing tests. Both were found within
+minutes of rendering real data in the web UI, because a screen puts related
+numbers side by side where a CLI prints them one command apart.
+
+### Exact copies were reported as near-duplicates (Phase 6)
+
+The overview showed **Exact duplicates: 324 KB** next to **Near-duplicates:
+614 KB across 9 groups**. The fixture generator builds 6 near-duplicate
+groups. The other 3 were the exact-duplicate groups again: byte-identical files
+have identical perceptual hashes, sit at Hamming distance 0, and so formed their
+own "near-duplicate" groups. The review screen then described three identical
+files as *"visually similar but not identical"* — false — and a user adding the
+two cards would have counted the same 324 KB twice.
+
+No test caught it because no test compared similar groups to the manifest.
+`TestNearDuplicatesAreNotReportedAsExact` existed; its mirror did not.
+
+**Fix:** similarity candidates are collapsed to one per distinct file before
+grouping. Exact copies are the exact-duplicate pipeline's job; the similarity
+pipeline compares distinct images. Near-duplicate reclaimable space fell from
+614 KB to 290 KB — the difference is precisely the exact-duplicate total that
+had been counted twice.
+
+The representative is not arbitrary. It must be the same copy the
+exact-duplicate group suggests keeping, or the Review screen's two tabs would
+recommend keeping *different* copies of the same bytes. That ranking lives in
+SQL, and the final tiebreak compares paths under the database's collation — so
+it was extracted to one shared `exactKeeperOrder` fragment used by both
+queries, rather than reimplemented in Go where a string comparison can order
+two paths the other way.
+
+`BUILD_SIMILAR_GROUPS` also gained `COMPUTE_FILE_HASH` as a prerequisite.
+Collapsing depends on sha256, so grouping before every file was hashed would
+leave some copies uncollapsed and make the result depend on job timing.
+
+Two integration tests now pin it: the mirror test asserts the group count
+matches the manifest and no group holds two identical copies; a second plants a
+file that is both exactly duplicated *and* has a near-duplicate variant — a case
+the corpus lacked — and asserts the near-duplicate group contains exactly one
+copy, and that it is the exact-duplicate keeper. Disabling the collapse fails
+both, the first with *"found 9 near-duplicate groups, corpus was built with 6"*.
+
+### Every photo without GPS carried a warning (Phase 3)
+
+The detail panel showed, in red, *"Last error: gps unreadable: exif: tag
+GPSLongitude is not present"* — on a photo that simply has no GPS, which this
+project's own documentation calls normal rather than an error.
+
+The extractor intended to suppress exactly that case. It detected "no GPS block"
+by matching the error text for `"not found"`. goexif's message says
+`"is not present"`. The match never succeeded, so every EXIF-without-GPS photo —
+9 of 42 in the corpus — was stored with a spurious warning.
+
+**Fix:** use the library's typed error, `exif.IsTagNotPresentError`, instead of
+its wording. One subtlety kept: a GPS block with latitude but no longitude also
+yields that error, and that block genuinely is malformed, so latitude is probed
+and an incomplete block still warns. (The corpus has no such file, so that
+branch is not exercised by a test.)
+
+`TestMissingGPSIsNotAnError` already checked that such a photo did not *fail*.
+It never checked that it produced no *warning*, which is where the bug lived. The
+assertion was added first and failed on all 9 files before the fix.
+
+The lesson in both cases is the same: a test that checks the thing did not
+break is not a test that the thing is right.

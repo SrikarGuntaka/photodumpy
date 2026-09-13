@@ -239,11 +239,24 @@ func readLocation(x *exif.Exif, m *Metadata) {
 
 	lat, lon, err := x.LatLong()
 	if err != nil {
-		// No GPS block at all is the common case and not worth a warning. A
-		// GPS block that fails to parse is worth one.
-		if !strings.Contains(err.Error(), "not found") {
-			m.Warnings = append(m.Warnings, "gps unreadable: "+err.Error())
+		// No GPS at all is the common case and not worth a warning. A GPS
+		// block that is present but broken is worth one.
+		//
+		// Absence is detected by the library's TYPED error, not its message.
+		// The first version matched the text "not found" -- but goexif's
+		// message says "is not present", so the match never succeeded and
+		// every photo without GPS was stored with a spurious warning.
+		if exif.IsTagNotPresentError(err) {
+			// A missing tag is only "no GPS" if the block is absent entirely.
+			// Latitude without longitude is a malformed block and does merit a
+			// warning. LatLong reads longitude first, so probe latitude.
+			if _, latErr := x.Get(exif.GPSLatitude); latErr != nil {
+				return
+			}
+			m.Warnings = append(m.Warnings, "gps incomplete: "+err.Error())
+			return
 		}
+		m.Warnings = append(m.Warnings, "gps unreadable: "+err.Error())
 		return
 	}
 
