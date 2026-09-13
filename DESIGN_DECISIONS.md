@@ -135,7 +135,8 @@ irreplaceable personal data.
 
 **Decision.** dHash (difference hash): downsample to 9x8 greyscale, compare
 horizontally adjacent pixels, emit 64 bits. Similarity is Hamming distance,
-exposed in the API, with a configurable threshold (default 10).
+exposed in the API, with a configurable threshold (default 12 — see §16 for how
+it was measured).
 
 **Why dHash over the alternatives.**
 
@@ -382,7 +383,7 @@ than swallowed.
 
 ## 16. The similarity threshold was calibrated, not chosen
 
-**Decision.** Default Hamming distance 10 of 64, configurable via
+**Decision.** Default Hamming distance 12 of 64, configurable via
 `SIMILARITY_THRESHOLD`, hard-capped at 24.
 
 **How it was arrived at.** The first fixture corpus made dHash look broken:
@@ -399,9 +400,14 @@ The fixtures were the problem. A perceptual hash samples a 9×8 grid, and the
 corpus drew a 6px diagonal stripe every 64px — a periodic pattern that aliases
 catastrophically at that scale. Photographs have no such structure.
 
-With photo-realistic fixtures the corpus gives near-duplicates at worst 8 and
-unrelated at mean 30.2 with zero false positives, so 10 sits comfortably in the
-gap.
+With photo-realistic fixtures, `TestCalibrateSimilarityGap` measures
+near-duplicate pairs at 0–9 bits and unrelated pairs at 17–38, a usable gap of
+9–17. The default is 12: three bits above the widest genuine near-duplicate and
+five below the closest unrelated pair. An earlier default of 10 also passed, but
+with a single bit of headroom — it worked by luck rather than by margin. It sits
+below the gap's midpoint on purpose: a missed near-duplicate costs some disk
+space, while a false positive groups two unrelated photos and invites deleting
+one that was never a duplicate.
 
 **The honest limitation.** This is calibrated against *synthetic* images. Real
 photographs — especially flat scenes, night shots and heavily edited frames —
@@ -866,3 +872,125 @@ assertion was added first and failed on all 9 files before the fix.
 
 The lesson in both cases is the same: a test that checks the thing did not
 break is not a test that the thing is right.
+
+---
+
+## 22. The web UI
+
+### Served by the API, from the same origin
+
+The built UI is a directory of static files that the Go API serves on its own
+origin. A separate static server would make the browser treat UI and API as
+different origins: CORS headers, a preflight on every non-simple request, and a
+credentials policy to get right. On one origin there is no cross-origin request
+to permit, so none of that exists to misconfigure. In development, Vite proxies
+`/api` so the browser still sees one origin — the app cannot tell which setup it
+is under.
+
+It is a directory rather than `go:embed` so that `go build` and `go test` never
+depend on a Node toolchain having run first. Without a build present, the UI is
+simply absent and every API route still works.
+
+### Three kinds of request, and the SPA-fallback bug
+
+A path naming a real file is that file. A path with no extension is a client
+route and gets `index.html`. A path **with** an extension that does not exist is
+a 404 — never `index.html`. Serving HTML in place of a missing
+`/assets/index-OLD.js` is the classic single-page-app bug: the browser reports a
+MIME-type error that points nowhere near the cause, a stale cached `index.html`
+naming an asset from a previous build. Unmatched `/api/` paths are JSON 404s,
+registered on their own prefix so the UI's catch-all can never swallow them.
+
+Hashed assets are cached for a year as `immutable`; `index.html` is `no-cache`,
+because it is the one file that names the current build's assets.
+
+### A strict CSP that is not decorative
+
+`default-src 'self'` with no `unsafe-inline` or `unsafe-eval`, plus
+`frame-ancestors 'none'`, `base-uri 'none'` and `object-src 'none'`. Vite emits
+external scripts and stylesheets, and React applies inline `style` props through
+the CSSOM rather than as HTML attributes, which the policy permits — so the app
+needs no exemptions. Verified in the running container with zero console
+violations. A test fails if `unsafe-inline` or `unsafe-eval` ever appears.
+
+The page loads nothing from anywhere else. No CDN, no web fonts, no analytics:
+for a tool that reads someone's entire photo library, no third party learning
+that the page was opened is part of "local-first".
+
+### State lives in the URL
+
+Library, view, every filter, and which photo's panel is open are all in the URL.
+Every screen is bookmarkable, a refresh restores exactly what was showing, and
+the back button does what a user expects. Filter changes *replace* the history
+entry — otherwise typing "trip" adds four entries and back steps through "tri",
+"tr", "t". Opening a photo *pushes*, so back closes it.
+
+Two bugs were caught here before shipping. Closing the panel called `back()`
+whenever history state was null — but a pasted link *also* has null state, and in
+a tab with earlier browsing history that `back()` left the app entirely. The fix
+marks the entry the panel pushes, and closes by `back()` only on that marker.
+The follow-on: a `replace` wrote null state and would wipe the marker, or — when
+moving between photos inside a panel opened from a pasted link — stamp a marker
+onto an entry the panel never pushed. A replace now preserves existing state
+unless told otherwise. Both have tests, and both behaviours were exercised in
+the real browser.
+
+### The stale-response race
+
+Type "tri", then "trip". If the "tri" request is slower, its response lands
+last and overwrites the correct results — no error, just the wrong photos.
+`useApi` aborts the previous request when inputs change, **and** tags each
+request with a generation number, committing a result only if nothing newer has
+started. Abort alone is not enough: a response that has already arrived can
+still resolve. The test for this was mutation-checked — removing the generation
+guard makes it fail with the stale result on screen.
+
+### Pagination by offset, not by growing the limit
+
+The first "Load more" grew `limit` by 60 per click. The API clamps any limit
+above 500 back to its default of 100, so the ninth click would have silently
+*shrunk* a 480-photo grid to 100. Pages are now fetched by offset and appended,
+each tagged with the filter it was fetched for, so a page arriving after the
+filters changed can never be appended to a different query's results.
+
+### Filters the API does not support are not faked
+
+The overview's "worth a second look" card first linked to `?flagged=1`, a
+parameter the search API did not have. The server would have ignored it, and
+the page would have claimed to be filtered while showing every photo. Rather
+than fake it client-side, the API gained a real `has_flags` filter, tri-state
+like the others and matching the GIN index's predicate.
+
+### Honesty in the interface
+
+The same rules as the API, carried through to pixels:
+
+- **Unmeasured is a dash, never zero.** A photo with no quality score shows
+  `—`, not `0.00`.
+- **Hedged flags keep their hedge.** "Possibly blurry", with a note that flags
+  describe pixels, not merit.
+- **No delete button**, because there is no delete path. The review screen's
+  only action copies the non-keeper paths to the clipboard for the user to act
+  on in their own tools.
+- **The keeper's reasons are visible.** Near-duplicate members show resolution,
+  size and measured quality — the ranking's inputs — rather than a bare "keep".
+- **Timestamps render in UTC**, matching how EXIF wall-clock times were read. A
+  local-zone conversion would move a 23:30 photo onto the next day, and the date
+  is what the timeline groups by.
+
+### Deliberately small dependency surface
+
+React and React DOM at runtime; nothing else. Routing, data fetching and polling
+are each a few dozen lines written for this app's actual needs, rather than a
+router and a query library whose behaviour would have to be learned, configured
+and trusted. That is a trade-off rather than a rule: at a larger scale, a
+maintained query cache would earn its place.
+
+### Known gaps
+
+- **Orphaned thumbnails.** Deleting a library leaves its thumbnail files on
+  disk. The API refuses to serve them, since it checks the photo row first, but
+  nothing removes them.
+- **No component tests for the views.** Logic with real failure modes — the
+  race, history, encoding, formatting — is unit tested; the views were verified
+  by driving the running app, not by automated rendering tests.

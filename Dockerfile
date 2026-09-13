@@ -1,6 +1,26 @@
 # syntax=docker/dockerfile:1
 
 # ---------------------------------------------------------------------------
+# Web UI. Built in its own stage so the runtime image carries only the static
+# output -- no Node, no node_modules, none of the build toolchain.
+# ---------------------------------------------------------------------------
+FROM node:22-alpine AS web
+
+WORKDIR /web
+
+# Manifest and lockfile first, for the same layer-caching reason as go.mod
+# below: editing a component must not invalidate the dependency install.
+# `npm ci` installs exactly what the lockfile pins and fails if the two
+# disagree, rather than silently resolving newer versions mid-build.
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+
+COPY web/ ./
+# The build typechecks first (tsc -b), so a type error fails the image rather
+# than shipping.
+RUN npm run build
+
+# ---------------------------------------------------------------------------
 # Builder. One image builds all three binaries; they share ~all of their code,
 # so building them separately would mean compiling the same packages 3x.
 # ---------------------------------------------------------------------------
@@ -49,6 +69,9 @@ RUN apk add --no-cache ca-certificates tzdata && \
 COPY --from=builder /out/api /app/api
 COPY --from=builder /out/worker /app/worker
 COPY --from=builder /out/photo-organizer /usr/local/bin/photo-organizer
+# Owned by root and not writable by photouser: the process serving these files
+# has no reason to be able to change them.
+COPY --from=web /web/dist /app/web
 
 # Non-root. The photo mount is read-only anyway, but defence in depth is cheap
 # here and this container reads a user's entire personal photo library.

@@ -69,6 +69,10 @@ type Config struct {
 	// anchor before it starts a new event. Zero means the calibrated default.
 	ClusterMaxRadiusMeters float64
 
+	// WebDir is the directory holding the built web UI. Empty disables the UI;
+	// the API routes are unaffected either way.
+	WebDir string
+
 	// APIBaseURL is used by the CLI to reach the API.
 	APIBaseURL string
 }
@@ -89,6 +93,7 @@ func Load() (*Config, error) {
 		SimilarityThreshold:    l.Int("SIMILARITY_THRESHOLD", 0),
 		ClusterMaxGap:          l.Duration("CLUSTER_MAX_GAP", 0),
 		ClusterMaxRadiusMeters: l.Float("CLUSTER_MAX_RADIUS_METERS", 0),
+		WebDir:                 l.String("WEB_DIR", ""),
 		APIBaseURL:             l.String("API_BASE_URL", "http://localhost:8080"),
 	}
 

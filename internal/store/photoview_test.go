@@ -154,3 +154,22 @@ func TestMembershipNegationUsesNotExists(t *testing.T) {
 		t.Errorf("got %q, want NOT EXISTS", got)
 	}
 }
+
+func TestHasFlagsIsTriState(t *testing.T) {
+	absent, _ := PhotoFilter{}.predicate("lib")
+	if strings.Contains(absent, "quality_flags") {
+		t.Errorf("no has_flags filter should emit no quality_flags predicate:\n%s", absent)
+	}
+	yes, args := PhotoFilter{HasFlags: ptrBool(true)}.predicate("lib")
+	if !strings.Contains(yes, "quality_flags <> '{}'") {
+		t.Errorf("has_flags=true should require a non-empty array:\n%s", yes)
+	}
+	// Presence is an operator, not a value, so it binds nothing.
+	if len(args) != 1 {
+		t.Errorf("has_flags bound %d args, want only the library id", len(args))
+	}
+	no, _ := PhotoFilter{HasFlags: ptrBool(false)}.predicate("lib")
+	if !strings.Contains(no, "quality_flags = '{}'") || strings.Contains(no, "<>") {
+		t.Errorf("has_flags=false should require an empty array only:\n%s", no)
+	}
+}

@@ -96,6 +96,9 @@ func parsePhotoQuery(r *http.Request) (store.ListPhotosQuery, error) {
 	if out.Filter.HasGPS, err = parseTriState(q, "has_gps"); err != nil {
 		return out, err
 	}
+	if out.Filter.HasFlags, err = parseTriState(q, "has_flags"); err != nil {
+		return out, err
+	}
 	if out.Filter.HasDuplicates, err = parseTriState(q, "has_duplicates"); err != nil {
 		return out, err
 	}

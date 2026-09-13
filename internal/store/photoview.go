@@ -86,6 +86,10 @@ type PhotoFilter struct {
 	// different requests and a bool cannot express both.
 	HasGPS *bool
 
+	// HasFlags selects photos carrying at least one quality flag -- or, when
+	// false, none. Distinct from Flag, which selects one specific flag.
+	HasFlags *bool
+
 	// HasDuplicates, HasSimilar select photos that belong to a group.
 	HasDuplicates *bool
 	HasSimilar    *bool
@@ -196,6 +200,15 @@ func (f PhotoFilter) predicate(libraryID string) (string, []any) {
 			clauses = append(clauses, "latitude IS NOT NULL AND longitude IS NOT NULL")
 		} else {
 			clauses = append(clauses, "(latitude IS NULL OR longitude IS NULL)")
+		}
+	}
+	if f.HasFlags != nil {
+		// Matches the GIN index predicate on photos_quality_flags_idx exactly,
+		// so the planner can use it for the positive case.
+		if *f.HasFlags {
+			clauses = append(clauses, "quality_flags <> '{}'")
+		} else {
+			clauses = append(clauses, "quality_flags = '{}'")
 		}
 	}
 	if f.HasDuplicates != nil {

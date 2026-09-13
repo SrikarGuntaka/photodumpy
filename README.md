@@ -27,8 +27,8 @@ Built in phases, each independently runnable and testable.
 | 7 | Quality analysis (sharpness, exposure, contrast) | **Done** |
 | 8 | Time + location clustering | **Done** |
 | 9 | Full read API: filtering, sorting, photo detail | **Done** |
-| 10 | React frontend | Next |
-| 11 | Benchmarks and polish | Planned |
+| 10 | Thumbnails and React frontend | **Done** |
+| 11 | Benchmarks and polish | Next |
 
 Benchmarks are absent from this README on purpose. They will be added in Phase
 11 from measured runs, not estimates.
@@ -72,6 +72,33 @@ API      http://localhost:8080
 Process  OK (up 12s)
 Database UP (2ms)
 ```
+
+### The web UI
+
+Open **<http://localhost:8080>**. Add a folder (in Docker, `/photos` is the
+directory you set as `HOST_PHOTOS_DIR`) and the app scans it, queues analysis,
+and shows progress live as the workers run.
+
+| Screen | What it is for |
+|--------|----------------|
+| **Overview** | Headline numbers and per-stage pipeline progress. Polls while work is outstanding, pauses while the tab is hidden. |
+| **Review** | Exact and near-duplicate groups with a suggested keeper and the measurements behind it. The only action is *copy the other paths* — there is no delete button, because there is no delete path in this application. |
+| **Photos** | Search, filter by flag, GPS and group membership, sort by quality or date. |
+| **Timeline** | Events by time and place. Events dated only from file times are labelled low confidence. |
+
+Clicking any photo opens its full detail — metadata, quality scores, every
+group it belongs to — in a panel whose state lives in the URL, so it can be
+bookmarked and the back button closes it.
+
+The UI is served by the API itself from the same origin, so there is no CORS
+configuration and nothing to proxy. It loads nothing from any third party: the
+Content-Security-Policy is `default-src 'self'`, and nothing needs
+`unsafe-inline`.
+
+For UI development with hot reload, run `npm run dev` in `web/`. Vite proxies
+`/api` to the running API, so the browser still sees one origin.
+
+### The API
 
 The API is on <http://localhost:8080>:
 
@@ -422,6 +449,22 @@ just test the mock.
 ```bash
 make test-integration
 ```
+
+### Web UI tests
+
+```bash
+cd web
+npm ci
+npm test          # vitest: 48 tests
+npm run build     # typechecks first; a type error fails the build
+```
+
+These cover the logic that can be wrong without looking wrong: the
+stale-response race in `useApi` (a slow response for an old search must never
+overwrite a newer one — the test fails if the guard is removed), history
+handling for the photo panel, query-string encoding where `has_gps=false` and an
+absent `has_gps` mean different things, and the rule that an unmeasured value
+renders as a dash rather than zero.
 
 ### End to end
 

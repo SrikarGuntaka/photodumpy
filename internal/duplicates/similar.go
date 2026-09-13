@@ -95,7 +95,7 @@ type Group struct {
 // A user with a 20-shot burst wants one group, not fourteen overlapping ones.
 //
 // So: connected components, with the chaining risk mitigated rather than
-// hidden. The threshold is deliberately tight (10 of 64 bits), MaxDistance is
+// hidden. The threshold is deliberately tight (12 of 64 bits), MaxDistance is
 // reported per group so drift is visible, and every member's distance from the
 // suggested keeper is exposed. On the fixture corpus, unrelated photos average
 // 30 bits apart, so a chain would need several improbable intermediate hops.

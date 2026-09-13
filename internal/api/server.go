@@ -86,5 +86,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/libraries/{id}/jobs", s.handleListJobs)
 	mux.HandleFunc("GET /api/workers", s.handleListWorkers)
 
+	// Any /api/ path not matched above is a JSON 404, never the UI. More
+	// specific patterns always win in ServeMux, so this only catches what
+	// nothing else claimed.
+	mux.HandleFunc("/api/", s.apiNotFound)
+
+	// The web UI, when a build is present. Registered on "/" -- the least
+	// specific pattern -- so every route above takes precedence over it.
+	if s.cfg.WebDir != "" {
+		mux.Handle("/", webHandler(s.cfg.WebDir))
+	}
+
 	return s.withRequestLogging(s.withRecovery(mux))
 }
