@@ -15,6 +15,11 @@ x-app-env: &app-env
   SIMILARITY_THRESHOLD: ${SIMILARITY_THRESHOLD:-}
   CLUSTER_MAX_GAP: ${CLUSTER_MAX_GAP:-}
   CLUSTER_MAX_RADIUS_METERS: ${CLUSTER_MAX_RADIUS_METERS:-}
+  # Jobs each worker runs at once. Empty means one per CPU the container sees.
+  # Worth setting when scaling workers: every replica defaults to ALL the
+  # host's CPUs, so `--scale worker=4` would oversubscribe the machine four
+  # times over -- and on 12MP photos, run out of memory first.
+  PROCESS_CONCURRENCY: ${PROCESS_CONCURRENCY:-}
 
 services:
   postgres:
@@ -79,9 +84,10 @@ services:
       start_period: 10s
 
   worker:
-    # Phase 1: this process connects and idles. The job queue lands in Phase 5,
-    # at which point `docker compose up --scale worker=4` becomes meaningful.
-    # It is here now so the image, wiring and shutdown path are exercised early.
+    # Consumes the job queue. Scale horizontally with
+    # `docker compose up -d --scale worker=N`; every replica claims from the
+    # same Postgres queue with FOR UPDATE SKIP LOCKED, so no coordination is
+    # needed between them. See PROCESS_CONCURRENCY above before scaling.
     build:
       context: .
       target: runtime

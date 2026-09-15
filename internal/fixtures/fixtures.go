@@ -110,6 +110,12 @@ type Options struct {
 	// Scenes is the number of distinct base images. Total file count is larger
 	// because of duplicates and variants.
 	Scenes int
+
+	// Width and Height of the base images. Zero means 640x480, which every
+	// test uses. Larger sizes exist for benchmarking: on real 12MP photos,
+	// JPEG decode dominates per-job cost, and a benchmark over 640x480 images
+	// would mostly measure queue overhead instead.
+	Width, Height int
 }
 
 // Generate writes the corpus and returns its manifest. Any existing content at
@@ -118,6 +124,15 @@ func Generate(opts Options) (*Manifest, error) {
 	if opts.Scenes <= 0 {
 		opts.Scenes = 24
 	}
+	w, h := opts.Width, opts.Height
+	if w <= 0 || h <= 0 {
+		w, h = 640, 480
+	}
+	// The blur radius scales with the image. Quality analysis downsamples every
+	// image to a 512px long edge before measuring, so a fixed 6px blur would
+	// shrink below one pixel on a 4000px image and the "blurry" ground truth
+	// would stop being true.
+	blurRadius := max(1, 6*w/640)
 	if opts.Root == "" {
 		return nil, fmt.Errorf("fixtures: Root is required")
 	}
@@ -186,7 +201,7 @@ func Generate(opts Options) (*Manifest, error) {
 			loc = dallas
 		}
 
-		img := scene(opts.Seed, sceneID, 640, 480)
+		img := scene(opts.Seed, sceneID, w, h)
 
 		// --- variant selection -------------------------------------------
 		// Each scene gets a role, cycling deterministically so the corpus has a
@@ -202,7 +217,7 @@ func Generate(opts Options) (*Manifest, error) {
 			if err := write(join(dir, sceneID+".jpg"), b, File{
 				Kind: "jpeg", CapturedAt: &t,
 				Latitude: fptr(loc[0]), Longitude: fptr(loc[1]),
-				Width: 640, Height: 480,
+				Width: w, Height: h,
 			}); err != nil {
 				return nil, err
 			}
@@ -224,7 +239,7 @@ func Generate(opts Options) (*Manifest, error) {
 				if err := write(join(d, name), b, File{
 					Kind: "jpeg", DuplicateGroup: group, CapturedAt: &t,
 					Latitude: fptr(loc[0]), Longitude: fptr(loc[1]),
-					Width: 640, Height: 480,
+					Width: w, Height: h,
 				}); err != nil {
 					return nil, err
 				}
@@ -241,7 +256,7 @@ func Generate(opts Options) (*Manifest, error) {
 			if err := write(join(dir, sceneID+".jpg"), orig, File{
 				Kind: "jpeg", SimilarGroup: group, CapturedAt: &t,
 				Latitude: fptr(loc[0]), Longitude: fptr(loc[1]),
-				Width: 640, Height: 480,
+				Width: w, Height: h,
 			}); err != nil {
 				return nil, err
 			}
@@ -255,13 +270,13 @@ func Generate(opts Options) (*Manifest, error) {
 			if err := write(join(dir, sceneID+"-recompressed.jpg"), recomp, File{
 				Kind: "jpeg", SimilarGroup: group, CapturedAt: &t,
 				Latitude: fptr(loc[0]), Longitude: fptr(loc[1]),
-				Width: 640, Height: 480,
+				Width: w, Height: h,
 			}); err != nil {
 				return nil, err
 			}
 
 			// Resized to half dimensions.
-			small := resizeNearest(img, 320, 240)
+			small := resizeNearest(img, w/2, h/2)
 			sb, err := encodeJPEGWithEXIF(small, 85, &shotAt, &loc)
 			if err != nil {
 				return nil, err
@@ -269,13 +284,13 @@ func Generate(opts Options) (*Manifest, error) {
 			if err := write(join(dir, sceneID+"-small.jpg"), sb, File{
 				Kind: "jpeg", SimilarGroup: group, CapturedAt: &t,
 				Latitude: fptr(loc[0]), Longitude: fptr(loc[1]),
-				Width: 320, Height: 240,
+				Width: w / 2, Height: h / 2,
 			}); err != nil {
 				return nil, err
 			}
 
 		case 3: // blurry
-			blurred := boxBlur(img, 6)
+			blurred := boxBlur(img, blurRadius)
 			b, err := encodeJPEGWithEXIF(blurred, 88, &shotAt, &loc)
 			if err != nil {
 				return nil, err
@@ -284,7 +299,7 @@ func Generate(opts Options) (*Manifest, error) {
 			if err := write(join(dir, sceneID+"-blurry.jpg"), b, File{
 				Kind: "jpeg", Blurry: true, CapturedAt: &t,
 				Latitude: fptr(loc[0]), Longitude: fptr(loc[1]),
-				Width: 640, Height: 480,
+				Width: w, Height: h,
 			}); err != nil {
 				return nil, err
 			}
@@ -315,7 +330,7 @@ func Generate(opts Options) (*Manifest, error) {
 			}
 			if err := write(join(dir, sceneID+"-dark.jpg"), db, File{
 				Kind: "jpeg", Underexposed: true, SimilarGroup: exposureGroup, CapturedAt: &t,
-				Width: 640, Height: 480,
+				Width: w, Height: h,
 			}); err != nil {
 				return nil, err
 			}
@@ -327,7 +342,7 @@ func Generate(opts Options) (*Manifest, error) {
 			}
 			if err := write(join(dir, sceneID+"-bright.jpg"), bb, File{
 				Kind: "jpeg", Overexposed: true, SimilarGroup: exposureGroup, CapturedAt: &t,
-				Width: 640, Height: 480,
+				Width: w, Height: h,
 			}); err != nil {
 				return nil, err
 			}
@@ -338,7 +353,7 @@ func Generate(opts Options) (*Manifest, error) {
 				return nil, err
 			}
 			if err := write(join(dir, sceneID+"-noexif.jpg"), buf.Bytes(), File{
-				Kind: "jpeg", Width: 640, Height: 480,
+				Kind: "jpeg", Width: w, Height: h,
 			}); err != nil {
 				return nil, err
 			}
@@ -349,7 +364,7 @@ func Generate(opts Options) (*Manifest, error) {
 				return nil, err
 			}
 			if err := write(join(dir, sceneID+".png"), buf.Bytes(), File{
-				Kind: "png", Width: 640, Height: 480,
+				Kind: "png", Width: w, Height: h,
 			}); err != nil {
 				return nil, err
 			}
@@ -361,7 +376,7 @@ func Generate(opts Options) (*Manifest, error) {
 			}
 			t := shotAt.Format(time.RFC3339)
 			if err := write(join(dir, sceneID+"-nogps.jpg"), b, File{
-				Kind: "jpeg", CapturedAt: &t, Width: 640, Height: 480,
+				Kind: "jpeg", CapturedAt: &t, Width: w, Height: h,
 			}); err != nil {
 				return nil, err
 			}
@@ -397,7 +412,7 @@ func Generate(opts Options) (*Manifest, error) {
 	// A real JPEG truncated mid-stream -- decodes partially then errors, which
 	// is a different failure path from "not a JPEG at all".
 	{
-		full, err := encodeJPEGWithEXIF(scene(opts.Seed, "truncated", 640, 480), 90, nil, nil)
+		full, err := encodeJPEGWithEXIF(scene(opts.Seed, "truncated", w, h), 90, nil, nil)
 		if err != nil {
 			return nil, err
 		}

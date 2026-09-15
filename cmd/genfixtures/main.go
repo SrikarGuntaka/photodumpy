@@ -18,6 +18,8 @@ func main() {
 	root := flag.String("root", "./sample-photos", "directory to write the corpus into")
 	seed := flag.Int64("seed", 1, "random seed; same seed produces identical output")
 	scenes := flag.Int("scenes", 24, "number of distinct base images")
+	width := flag.Int("width", 640, "base image width in pixels")
+	height := flag.Int("height", 480, "base image height in pixels")
 	clean := flag.Bool("clean", false, "delete the target directory first")
 	flag.Parse()
 
@@ -28,7 +30,9 @@ func main() {
 		}
 	}
 
-	m, err := fixtures.Generate(fixtures.Options{Root: *root, Seed: *seed, Scenes: *scenes})
+	m, err := fixtures.Generate(fixtures.Options{
+		Root: *root, Seed: *seed, Scenes: *scenes, Width: *width, Height: *height,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
