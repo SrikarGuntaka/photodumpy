@@ -880,7 +880,11 @@ func cmdCrash(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("crash", flag.ExitOnError)
 	e, c := commonFlags(fs)
 	workers := fs.Int("workers", 3, "workers in the fleet; one is killed")
-	concurrency := fs.Int("concurrency", 2, "jobs each worker runs at once")
+	// 4 rather than the pipeline benchmark's 2: the kill can interrupt at most
+	// this many executions, and one interrupted job is a thin demonstration.
+	// 3 workers x 4 is 12 slots, within the reference machine's 12
+	// performance-core threads.
+	concurrency := fs.Int("concurrency", 4, "jobs each worker runs at once")
 	killAt := fs.Float64("kill-at", 0.25, "kill once this fraction of jobs has succeeded")
 	timeout := fs.Duration("timeout", 30*time.Minute, "overall limit")
 	out := fs.String("out", "benchmarks/crash-recovery.md", "report path (empty to skip writing)")
@@ -1072,7 +1076,13 @@ func cmdCrash(ctx context.Context, args []string) error {
 	}
 
 	fmt.Fprintf(&b, "## Why the reclaim takes as long as it does\n\n")
-	fmt.Fprintf(&b, "A SIGKILLed worker releases nothing. Its leases stay valid until they expire (60 s after the last renewal, so 55–60 s after the kill), and are reclaimed on the next reaper pass (up to 15 s later): an expected window of roughly 55–75 s. That delay is the price of not stealing work from a worker that is merely slow; a clean `docker compose stop` releases leases immediately instead.\n")
+	fmt.Fprintf(&b, "A SIGKILLed worker releases nothing, so its work waits on four things in sequence:\n\n")
+	fmt.Fprintf(&b, "| Step | Adds |\n|---|---|\n")
+	fmt.Fprintf(&b, "| Lease expires: 60 s after its last renewal, which was 0–5 s before the kill | 55–60 s |\n")
+	fmt.Fprintf(&b, "| Next reaper pass reclaims it (every surviving worker reaps every 15 s) | 0–15 s |\n")
+	fmt.Fprintf(&b, "| First-retry backoff before the job is claimable (2 s ±25%%) | 1.5–2.5 s |\n")
+	fmt.Fprintf(&b, "| A worker frees a slot and claims it | about 0–2 s here |\n\n")
+	fmt.Fprintf(&b, "That is a window of roughly **57–80 s**. The delay is deliberate: a shorter lease recovers faster but risks reclaiming work from a worker that is merely slow, running it twice. A clean `docker compose stop` releases leases immediately instead of waiting.\n")
 
 	report := b.String()
 	fmt.Println(report)
