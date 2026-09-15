@@ -610,7 +610,10 @@ func describeEnvironment(ctx context.Context) []string {
 	}
 	if out, err := run(ctx, nil, "git", "rev-parse", "--short", "HEAD"); err == nil {
 		commit := strings.TrimSpace(out)
-		if st, err := run(ctx, nil, "git", "status", "--porcelain"); err == nil && strings.TrimSpace(st) != "" {
+		// benchmarks/ is excluded: it is where these reports are written, so a
+		// report from an earlier command in the same session would otherwise
+		// mark every later run as coming from a modified tree.
+		if st, err := run(ctx, nil, "git", "status", "--porcelain", "--", ".", ":(exclude)benchmarks"); err == nil && strings.TrimSpace(st) != "" {
 			commit += " (with uncommitted changes)"
 		}
 		lines = append(lines, "Commit: "+commit)
@@ -954,18 +957,6 @@ func cmdCrash(ctx context.Context, args []string) error {
 		return fmt.Errorf("worker hostname %q is not a container id; is it running under compose?", container)
 	}
 
-	hrows, err := e.sql(ctx, fmt.Sprintf(`SELECT id FROM jobs
-		WHERE library_id = '%s' AND status = 'running' AND leased_by = '%s' ORDER BY id`, id, victimID))
-	if err != nil {
-		return err
-	}
-	var held []string
-	for _, r := range hrows {
-		if _, err := strconv.ParseInt(r[0], 10, 64); err == nil {
-			held = append(held, r[0])
-		}
-	}
-
 	// Kill time is taken from the DATABASE clock, the same clock that stamps
 	// every job execution, so recovery latency is a subtraction between two
 	// readings of one clock rather than across a host/container boundary.
@@ -977,7 +968,7 @@ func cmdCrash(ctx context.Context, args []string) error {
 
 	// SIGKILL: no shutdown hook runs, no lease is released, nothing is flushed.
 	// This is a crash, not a stop.
-	logf("SIGKILL worker %s (container %s) holding %d leases", victimID[:8], container, len(held))
+	logf("SIGKILL worker %s (container %s)", victimID[:8], container)
 	if _, err := run(ctx, nil, "docker", "kill", "--signal", "KILL", container); err != nil {
 		return err
 	}
@@ -989,61 +980,57 @@ func cmdCrash(ctx context.Context, args []string) error {
 	wall := time.Since(start)
 	logf("queue drained %s after processing began", wall.Round(time.Second))
 
-	// Fate of every job the victim held.
-	type fate struct {
-		id                 string
-		status             string
-		executions         int
-		reclaimedAfter     float64 // seconds after the kill; -1 if never
-		succeededElsewhere bool
-	}
-	var fates []fate
-	if len(held) > 0 {
-		frows, err := e.sql(ctx, fmt.Sprintf(`
-			SELECT j.id, j.status,
-			       (SELECT count(*) FROM job_executions x WHERE x.job_id = j.id),
-			       COALESCE((SELECT extract(epoch FROM min(x.started_at)) FROM job_executions x
-			                 WHERE x.job_id = j.id AND x.worker_id <> '%s'), -1),
-			       (SELECT count(*) FROM job_executions x
-			        WHERE x.job_id = j.id AND x.worker_id <> '%s' AND x.outcome = 'succeeded')
-			FROM jobs j WHERE j.id IN (%s) ORDER BY j.id`,
-			victimID, victimID, strings.Join(held, ",")))
-		if err != nil {
-			return err
-		}
-		for _, r := range frows {
-			f := fate{id: r[0], status: r[1]}
-			f.executions, _ = strconv.Atoi(r[2])
-			at, _ := strconv.ParseFloat(r[3], 64)
-			f.reclaimedAfter = -1
-			if at > 0 {
-				f.reclaimedAfter = at - killedAt
-			}
-			n, _ := strconv.Atoi(r[4])
-			f.succeededElsewhere = n > 0
-			fates = append(fates, f)
-		}
+	// WHICH WORK WAS INTERRUPTED is read from the record afterwards, not
+	// predicted beforehand.
+	//
+	// The first version listed the victim's leases, then killed it. Between
+	// the two sat two `docker compose exec` round trips -- about half a
+	// second -- in which the victim finished the listed jobs and claimed new
+	// ones. The report then said nothing had been recovered, while the run's
+	// extra 60 s of wall time said a lease had expired: the tool had tracked
+	// the wrong jobs.
+	//
+	// The job_executions table has no such race. An execution the victim
+	// started and never finished is exactly one the kill interrupted -- the
+	// reaper marks it 'abandoned' when it reclaims the lease.
+	frows, err := e.sql(ctx, fmt.Sprintf(`
+		SELECT j.id, j.status,
+		       COALESCE((SELECT extract(epoch FROM min(y.started_at)) FROM job_executions y
+		                 WHERE y.job_id = j.id AND y.worker_id <> x.worker_id
+		                   AND y.started_at > x.started_at), -1),
+		       (SELECT count(*) FROM job_executions y
+		        WHERE y.job_id = j.id AND y.worker_id <> x.worker_id AND y.outcome = 'succeeded')
+		FROM job_executions x JOIN jobs j ON j.id = x.job_id
+		WHERE j.library_id = '%s' AND x.worker_id = '%s'
+		  AND (x.outcome IS NULL OR x.outcome = 'abandoned')
+		ORDER BY j.id`, id, victimID))
+	if err != nil {
+		return err
 	}
 
 	problems := e.verify(ctx, libID, m, final)
 
 	var latencies []float64
-	recovered, finishedBeforeKill, lost := 0, 0, 0
-	for _, f := range fates {
-		switch {
-		case f.succeededElsewhere:
+	interrupted, recovered, lost := len(frows), 0, 0
+	for _, r := range frows {
+		if len(r) < 4 {
+			continue
+		}
+		n, _ := strconv.Atoi(r[3])
+		if n > 0 && r[1] == "succeeded" {
 			recovered++
-			latencies = append(latencies, f.reclaimedAfter)
-		case f.status == "succeeded":
-			// The victim completed it in the instant between being chosen and
-			// receiving the signal. Not lost; not a recovery either.
-			finishedBeforeKill++
-		default:
+			if at, _ := strconv.ParseFloat(r[2], 64); at > 0 {
+				latencies = append(latencies, at-killedAt)
+			}
+		} else {
 			lost++
 		}
 	}
+	if interrupted == 0 {
+		problems = append(problems, "the kill interrupted no execution, so nothing was demonstrated; run again")
+	}
 	if lost > 0 {
-		problems = append(problems, fmt.Sprintf("%d of the killed worker's jobs were never completed", lost))
+		problems = append(problems, fmt.Sprintf("%d of the killed worker's interrupted jobs were never completed", lost))
 	}
 
 	restarted := "no"
@@ -1067,9 +1054,8 @@ func cmdCrash(ctx context.Context, args []string) error {
 	fmt.Fprintf(&b, "## What happened\n\n")
 	fmt.Fprintf(&b, "| | |\n|---|---|\n")
 	fmt.Fprintf(&b, "| Killed at | %.0f%% of jobs succeeded |\n", *killAt*100)
-	fmt.Fprintf(&b, "| Leases held by the killed worker | %d |\n", len(held))
+	fmt.Fprintf(&b, "| Executions interrupted by the kill | %d |\n", interrupted)
 	fmt.Fprintf(&b, "| Re-run and completed by another worker | %d |\n", recovered)
-	fmt.Fprintf(&b, "| Completed by the victim just before the signal landed | %d |\n", finishedBeforeKill)
 	fmt.Fprintf(&b, "| Lost | %d |\n", lost)
 	if len(latencies) > 0 {
 		lo, hi := minMax(latencies)
