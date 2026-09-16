@@ -363,7 +363,7 @@ func TestUnionFind(t *testing.T) {
 // The O(n^2) benchmark. Its purpose is to make the crossover point where
 // bucketing becomes worthwhile a measured number rather than a guess.
 func BenchmarkGroupSimilar(b *testing.B) {
-	for _, n := range []int{100, 1000, 5000} {
+	for _, n := range []int{100, 1000, 5000, 10000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			rng := rand.New(rand.NewSource(1))
 			candidates := make([]Candidate, n)

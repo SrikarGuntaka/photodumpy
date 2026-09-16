@@ -3,9 +3,9 @@
 How the system is put together. For *why* each choice was made, see
 [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md).
 
-> Sections describing phases that are not yet built are marked **(planned)**.
-> They are documented now because the Phase 1 schema and package boundaries were
-> shaped by them.
+> Every phase described here is built. Section headings still note the phase
+> that implemented each part, which is useful for reading the git history
+> alongside this document.
 
 ---
 
@@ -48,8 +48,12 @@ it recursively, and for each supported file inserts a `photos` row keyed by
 `(library_id, relative_path)`.
 
 The scan is *not* a job. Splitting a directory walk into jobs would require
-knowing the tree before walking it. Instead the API streams the walk, inserting
-rows and fanning out per-photo jobs as it goes.
+knowing the tree before walking it. Instead the API streams the walk and inserts
+rows. Work is fanned out separately, by `POST /api/libraries/{id}/process`,
+which enqueues one job per photo per stage that has not yet completed, plus the
+library-wide aggregate stages. Keeping the two apart means a rescan never
+enqueues anything, and processing always sees the whole library rather than
+whatever fraction a scan-in-progress had reached.
 
 ### How a scan actually runs (implemented)
 
@@ -143,13 +147,18 @@ interface implementation rather than a rewrite.
         │                  ▼
         │            attempt >= max
         │                  ▼
-        └───────────      dead       (manual requeue → pending)
+        └───────────      dead
 ```
 
 Four resting states: `pending`, `running`, `succeeded`, `dead`. A retryable
 failure returns the row to `pending` with a future `next_attempt_at` rather than
 sitting in a separate `failed` state — which is what keeps the claim query a
 single indexed read.
+
+A `dead` job is terminal; there is no requeue operation. Recovery comes from
+calling `POST /process` again: its dedupe index covers only pending and running
+jobs, and a photo whose stage never completed still has that stage's marker
+column unset, so it simply receives a fresh job.
 
 ### Claiming
 
@@ -211,10 +220,10 @@ than double-writing while another worker legitimately takes over.
 Three independent limits, because photo processing saturates different
 resources:
 
-1. **Semaphore** of `WORKER_CONCURRENCY` (default `NumCPU`) around job execution
+1. **Semaphore** of `PROCESS_CONCURRENCY` (default `NumCPU`) around job execution
    — caps goroutines and, more importantly, caps how many decoded images are
    resident at once.
-2. **Connection pool** of `WORKER_CONCURRENCY + 4` — caps database contention.
+2. **Connection pool** of `PROCESS_CONCURRENCY + 4` — caps database contention.
    The `+4` reserves headroom so heartbeat, renewal and reaper cannot be starved
    by job work.
 3. **Claim batch size** = free slots only.
@@ -227,21 +236,36 @@ Postgres holds paths and derived data. **Image bytes are never stored in the
 database.** Originals stay on disk, read-only; thumbnails are written to a
 separate volume.
 
-Current schema (Phase 1):
+Schema after all nine migrations:
 
 ```
-libraries ──< photos
-```
-
-Target schema:
-
-```
-libraries ──< photos ──< duplicate_group_members >── duplicate_groups
+libraries ─┬─< photos ─┬─< duplicate_group_members >─ duplicate_groups ─┐
+           │           ├─< similar_group_members   >─ similar_groups   ─┤
+           │           └─< cluster_members         >─ clusters         ─┤
+           │                                                            │
+           ├─< duplicate_groups / similar_groups / clusters  <──────────┘
+           │
+           └─< jobs ──< job_executions
                  │
-                 ├──< cluster_photos >── clusters
-                 │
-                 └──< jobs (target_type = 'photo' | 'library')      workers
+                 └── leased_by >── workers
+
+schema_migrations   (applied versions + checksums; see migrations/)
 ```
+
+Every library-scoped table cascades from `libraries`, so removing a library
+removes its photos, groups, clusters, jobs and job history in one statement.
+`workers` and `schema_migrations` are global.
+
+`jobs.target_id` names a photo or the library itself, depending on
+`target_type`; it is deliberately not a foreign key, because one column refers
+to two tables. `jobs.leased_by` is one, with `ON DELETE SET NULL`: removing a
+worker row must never delete the work it held. `job_executions.worker_id` is
+not a foreign key at all — the execution audit trail must outlive the worker
+rows it refers to.
+
+`cluster_members.photo_id` is `UNIQUE` — a photo belongs to at most one event —
+while a photo may be in a duplicate group *and* a similar group, which is why
+membership lives in join tables rather than columns on `photos`.
 
 Derived metrics (sharpness, exposure, hashes) live as columns on `photos` rather
 than in side tables: the relationship is strictly 1:1, there is no history to
@@ -292,9 +316,9 @@ otherwise the processor would retry the same corrupt file forever.
 |-----|-------|--------|
 | `EXTRACT_METADATA` | 3 | dimensions, capture time, GPS, format *(implemented)* |
 | `COMPUTE_FILE_HASH` | 4 | `sha256` (streamed, never fully buffered) *(implemented)* |
-| `GENERATE_THUMBNAIL` | 6 | `thumbnail_path` *(not implemented; deferred to the frontend phase)* |
 | `COMPUTE_PERCEPTUAL_HASH` | 6 | `phash` *(implemented)* |
 | `ANALYZE_QUALITY` | 7 | sharpness, exposure, contrast, resolution, quality score, flags *(implemented)* |
+| `GENERATE_THUMBNAIL` | 10 | a 400px oriented JPEG on the thumbnail volume, named by photo id; `thumbnail_width/height/bytes` *(implemented)* |
 
 Each is a deterministic function of file bytes whose completion is an
 `UPDATE photos SET ... WHERE id = $1`. Running one twice writes identical
@@ -364,7 +388,7 @@ confident "event".
 | Worker shut down cleanly | Leases released immediately; work reassigned without waiting out the lease. |
 | API restarts | Stateless. In-flight HTTP requests drain within the shutdown grace period. Jobs already enqueued are unaffected. |
 | Postgres restarts | Connection pool retries with capped backoff. Workers stop claiming and resume; jobs in flight lose their lease renewal and are reclaimed. The API stays up — `/healthz` deliberately does not check the database. |
-| Malformed image | Job fails permanently after `max_attempts`; photo marked `failed` with the reason. Other photos are unaffected. |
+| Malformed image | Recorded on the **first** attempt, with no retries: the photo is marked `failed` with the reason and the job completes. Retrying cannot change the bytes, so spending `max_attempts` on it would only delay the report. Other photos are unaffected. |
 | Corrupt or absent EXIF | Not an error. `captured_at` falls back to filesystem mtime, recorded via `captured_at_source`. |
 | Missing GPS | Not an error. Latitude/longitude stay `NULL` — never `(0,0)`, which is a real location. |
 | Missing timestamp | Photo is excluded from chronological clustering and counted as `undated`. Not dropped -- the totals reconcile. |
@@ -378,18 +402,27 @@ confident "event".
 
 ```
 cmd/{api,worker,cli}          process entry points
+cmd/genfixtures               writes a synthetic corpus with known ground truth
+cmd/bench                     pipeline benchmark and crash-recovery demo
 internal/config               env -> typed config, validated at startup
 internal/database             pgx pool, migration runner
-internal/store                ALL SQL. Nothing else imports pgx.
-internal/jobs                 queue: claim, lease, retry, reap, registry
-internal/worker               runtime: pool, heartbeat, renewal, shutdown
-internal/photos               domain types + PhotoSource seam
-internal/{metadata,hashing,quality,duplicates,clustering}
+internal/store                ALL SQL lives here
+internal/jobs                 queue vocabulary: types, states, backoff, dedupe keys
+internal/worker               runtime: claim loop, heartbeat, renewal, reaper, handlers
+internal/ingest               scanning and the per-photo units the handlers call
+internal/photos               domain types, path containment, directory walk
+internal/{metadata,hashing,quality,duplicates,clustering,thumbnail}
                               pure algorithms — no database import
-internal/api                  HTTP handlers only
+internal/fixtures             corpus generator shared by tests and benchmarks
+internal/api                  HTTP handlers, media serving, the web UI's static host
 migrations/                   embedded .sql
+web/                          React + TypeScript UI, built by Vite
 ```
 
+All SQL is in `internal/store`. The only other packages that import pgx are
+`internal/database`, which owns the pool and migrations, and `internal/api`,
+which holds the pool solely to ping it for `/readyz`.
+
 The rule that makes this testable: the algorithm packages take values and return
-values. Haversine, clustering, blur detection and hash comparison are unit
-tested with synthetic input and no Postgres anywhere.
+values. Haversine, clustering, blur detection, hash comparison and thumbnail
+orientation are unit tested with synthetic input and no Postgres anywhere.

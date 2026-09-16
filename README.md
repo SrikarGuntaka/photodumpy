@@ -28,10 +28,9 @@ Built in phases, each independently runnable and testable.
 | 8 | Time + location clustering | **Done** |
 | 9 | Full read API: filtering, sorting, photo detail | **Done** |
 | 10 | Thumbnails and React frontend | **Done** |
-| 11 | Benchmarks and polish | Next |
+| 11 | Benchmarks, crash-recovery demo, polish | **Done** |
 
-Benchmarks are absent from this README on purpose. They will be added in Phase
-11 from measured runs, not estimates.
+All benchmark figures in this README are measured; see [Performance](#performance).
 
 ---
 
@@ -221,8 +220,9 @@ output, and different seeds produce different corpora.
 Why synthetic first: pointed at a real folder, "found 12 duplicate groups" is
 unfalsifiable, because nobody knows how many that folder actually contains. The
 generator decides, so a test can assert. Real photo libraries are the better
-*validation* input — and the Phase 11 benchmarks use one — but they cannot
-verify correctness.
+*validation* input, but they cannot verify correctness — and this project has
+not yet been validated against one. The benchmarks use a generated corpus too,
+at real 12MP resolution; see [Performance](#performance).
 
 To use your own photos instead, set `HOST_PHOTOS_DIR` in `.env`.
 
@@ -420,6 +420,46 @@ place among its siblings. The distance column means different things per
 group — Hamming bits for near-duplicates, metres for an event — and exact
 duplicates have none, because they are identical.
 
+## Performance
+
+Measured on one laptop (Intel Core Ultra 7 155H, Docker Desktop on Windows)
+against a synthetic corpus of 68 images at 12 megapixels. Every timed run was
+verified against the corpus's ground truth before it counted. Full reports,
+methodology and caveats are in [benchmarks/](benchmarks/README.md).
+
+**Scaling the worker fleet** — 343 jobs, median of 3 runs:
+
+| Workers | Wall time | Speedup |
+|---:|---:|---:|
+| 1 | 71.2 s | 1.00× |
+| 2 | 34.4 s | 2.07× |
+| 4 | 17.8 s | 4.00× |
+| 8 | 15.3 s | 4.66× |
+| 16 | 14.4 s | 4.94× |
+
+Near-linear to 4 workers. Past that, per-job latency roughly triples — the work
+itself slows down, rather than workers waiting on the queue — which is
+consistent with jobs spilling off this CPU's 6 performance cores.
+
+**Crash recovery** — a worker holding 4 in-flight jobs was killed with SIGKILL
+mid-run. All 4 were reclaimed after their leases expired (70.2 s, inside the
+57–80 s window the lease and reaper timings predict) and completed by other
+workers. Nothing was lost, no job died, and the final results matched ground
+truth exactly.
+
+**Per operation**, single-threaded medians:
+
+| Operation | Time |
+|---|---:|
+| Read a 12MP photo's metadata (header and EXIF only) | 30 µs |
+| Decode a 12MP photo and compute its perceptual hash | 189 ms |
+| Group 10,000 photos by visual similarity (50M comparisons) | 74 ms |
+| Cluster 100,000 photos into events | 138 ms |
+| SHA-256 throughput | 1.2 GB/s |
+
+Reproduce with `go run ./cmd/bench pipeline` and `go run ./cmd/bench crash`
+against the running stack.
+
 ## Testing
 
 **[TESTING.md](TESTING.md) is a step-by-step walkthrough** covering everything
@@ -512,6 +552,18 @@ expires and the work is picked up by someone else.
   API to a network you do not control.
 - **Photos must live under one directory tree.** The application can only read
   inside the configured `PHOTO_ROOT`, by design.
+- **Not yet validated on a real photo library.** Every correctness check and
+  benchmark uses a generated corpus with known ground truth. The similarity and
+  quality thresholds were calibrated on those synthetic images, and real
+  photographs — night shots, flat scenes, heavy edits — may distribute
+  differently. Treat the defaults as a starting point, not a verdict.
+- **No video.** Video files are skipped as unsupported.
+- **Deleting a library orphans its thumbnail files.** There is no deletion
+  endpoint, so this only arises from removing rows by hand; the API refuses to
+  serve such thumbnails, but nothing removes them from the volume.
+- **Performance figures are one laptop's.** The scaling plateau in
+  [Performance](#performance) reflects a hybrid CPU with 6 performance cores; a
+  machine with uniform cores would likely scale further.
 
 ## Privacy
 

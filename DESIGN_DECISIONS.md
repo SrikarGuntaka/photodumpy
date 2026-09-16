@@ -994,3 +994,111 @@ maintained query cache would earn its place.
 - **No component tests for the views.** Logic with real failure modes — the
   race, history, encoding, formatting — is unit tested; the views were verified
   by driving the running app, not by automated rendering tests.
+
+---
+
+## 23. Benchmarks: a number the tool cannot trust is not reported
+
+The results are in [benchmarks/](benchmarks/README.md). This section records how
+they were produced, because the methodology is what makes them worth anything —
+and because getting it wrong was easy, and happened.
+
+### A fast wrong answer is not a result
+
+Every timed pipeline run is checked against the corpus's ground truth before its
+time counts: photo count, exact and near-duplicate groups, zero dead jobs, every
+readable photo through every stage. A run that fails is reported as failed, not
+averaged in. Throughput from a pipeline producing wrong groups measures nothing
+anyone would want.
+
+### A verified run can still be an invalid measurement
+
+At high fan-out on 12MP images, a worker could be OOM-killed mid-run. Lease
+recovery would complete its work, so the run would *verify* — while its wall
+time silently included a 60-second lease expiry. The tool snapshots every worker
+container before and after each run, and marks the run invalid if any stopped,
+restarted or was OOM-killed. None were, across all 15 timed runs.
+
+### Why 12 megapixels
+
+The test corpus is 640×480, which is right for correctness and wrong for
+performance. At that size queue overhead dominates per-job cost; on a real phone
+photo, JPEG decode does. The generator gained a size option so benchmarks run at
+4032×3024. Pixel count then matches real photos; file size does not — generated
+scenes compress to about 1 MB where a real 12MP JPEG is 3–5 MB — so byte-scaled
+stages like SHA-256 are flattered, and the report says so.
+
+### Warm-ups, medians and pinned concurrency
+
+In a smoke test, the perceptual-hash stage's p95 was 1,041 ms in a freshly
+scaled 2-worker fleet, against 59 ms with 1 worker — cold-start costs such as
+connection setup and file caches, which belong to starting a worker, not to
+processing a photo. Each rescale is now
+followed by an unrecorded warm-up, then three timed runs with the median
+reported and the range shown.
+
+Per-worker concurrency is pinned to 2. Every replica otherwise defaults to all
+22 host CPUs, so `--scale worker=4` would oversubscribe the machine fourfold, and
+the benchmark would measure scheduler thrashing rather than horizontal scaling.
+
+### The plateau is explained by data, not asserted
+
+Throughput scaled near-linearly to 4 workers (4.00×) and then flattened (4.66× at
+8, 4.94× at 16). The per-job latency tables distinguish the two possible causes.
+If the queue were the bottleneck, jobs would run at the same speed and wait
+longer to be claimed. Instead the jobs themselves slowed down — thumbnail
+generation's median rose from 693 ms to 2,064 ms. On a CPU with 6 performance
+cores behind its 22 threads, that is consistent with work spilling onto much
+slower efficiency cores. The report presents that as interpretation, separately
+from the measurements, because these numbers cannot exclude memory bandwidth or
+the Windows bind mount as contributors.
+
+### The crash demo measured the wrong jobs
+
+The first crash run verified — nothing lost — but reported the killed worker's
+2 jobs as "completed just before the signal" and 0 recovered, while taking 80 s
+where about 25 s was expected. Those extra ~60 s were a lease expiring: recovery
+had happened, to jobs the report never looked at.
+
+The tool listed the victim's leases and then killed it, with two `docker compose
+exec` round trips — about half a second — between the two. The victim finished
+the listed jobs in that window and claimed new ones. The fix reads interrupted
+work from `job_executions` after the queue drains: an execution the victim
+started and never completed is exactly one the kill cut short. There is no
+timing window left to race.
+
+The same run also exposed the report's explanation as incomplete. It predicted
+reclaim within 55–75 s; the next valid run measured 75.6 s. The measurement was
+right. After the lease expires and the reaper runs, a reclaimed job also waits
+out its first-retry backoff and a free slot — about 57–80 s in total, now derived
+step by step in the report. The final run interrupted 4 executions and all 4
+were reclaimed at 70.2 s.
+
+### A run that did not finish produced no report
+
+One crash-demo run sent its SIGKILL, then logged nothing for ten hours: the
+laptop had slept, and Docker Desktop did not survive the wake. The tool wrote no
+report, which was the correct outcome — but the harness reported exit code 0,
+because the benchmark's output had been piped through `sed` and the pipe's exit
+code was the one captured. The run was repeated, with the tool's own exit code
+recorded directly.
+
+### No benchmark is subtracted from another
+
+The micro-benchmarks vary between runs by up to 2× on this machine, and one
+separate run of `GroupSimilar/n=10000` split into two clusters near 40 ms and
+70 ms with nothing between — the pattern expected when a single-threaded
+benchmark lands on a performance core in some runs and an efficiency core in
+others. An early reading "found" that thumbnail rendering was most of the
+thumbnail job's cost by subtracting one benchmark's median from another's. The
+next run's medians implied decoding took 30 ms, contradicting a direct 188 ms
+measurement. On this hardware the difference between two noisy medians is not a
+measurement, so none is reported.
+
+### Comments that guessed were corrected by the measurements
+
+`GroupSimilar` claimed 10,000 photos took "on the order of a second". Measured:
+57–82 ms, more than ten times faster; the comment now cites the benchmark.
+Migration 0006 carries its own figure — "80ms at 10,000 photos" — that is roughly
+consistent with the measurement; it stays as written, because applied migrations
+are immutable and checksummed.

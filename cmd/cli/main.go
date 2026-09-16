@@ -53,9 +53,16 @@ Flags:
   -timeout dur      Request timeout (default 30s)
   -name string      Library name for 'scan' (default: the folder's name)
   -force            For 'scan': override a library stuck in the scanning state
-  -wait             For 'scan'/'process': poll until the work finishes
-  -limit int        For 'photos': page size (default 20)
-  -offset int       For 'photos': page offset
+  -wait             For 'scan', 'process', 'hash', 'queue': poll until the work finishes
+  -limit int        Page size for listings (default 20)
+  -offset int       Page offset for listings
+  -flag string      For 'quality' and 'find': one quality flag, e.g. possibly_blurry
+  -q string         For 'find': substring of the file path
+  -gps true|false   For 'find': only photos with, or without, GPS
+  -from, -to date   For 'find': capture date range, YYYY-MM-DD
+  -sort key         For 'find': path, captured_at, file_size, quality, created_at
+  -desc             For 'find': reverse the sort
+  -all              For 'workers': include stopped and dead workers
 
 Paths given to 'scan' may be absolute or relative to the API's configured
 photo root. The API refuses any path outside that root.
@@ -103,6 +110,7 @@ func run(args []string, out io.Writer) error {
 	hasGPS := fs.String("gps", "", "filter 'find' by GPS presence: true or false")
 	fromDate := fs.String("from", "", "earliest capture date for 'find' (YYYY-MM-DD)")
 	toDate := fs.String("to", "", "latest capture date for 'find' (YYYY-MM-DD)")
+	allWorkers := fs.Bool("all", false, "for 'workers': also list stopped and dead workers")
 
 	positional, err := parseInterleaved(fs, args)
 	if err != nil {
@@ -186,7 +194,7 @@ func run(args []string, out io.Writer) error {
 		}
 		return cmdJobs(ctx, c, out, rest[0])
 	case "workers":
-		return cmdWorkers(ctx, c, out)
+		return cmdWorkers(ctx, c, out, *allWorkers)
 	case "photos":
 		if len(rest) < 1 {
 			return errors.New("photos requires a library id: photo-organizer photos <library-id>")
@@ -825,7 +833,8 @@ func cmdSimilar(ctx context.Context, c *client, out io.Writer, libraryID string,
 
 	fmt.Fprintln(out, "These are suggestions. No files have been modified, moved or deleted.")
 	fmt.Fprintln(out, "dist = Hamming distance from the KEEP photo, out of 64 bits.")
-	fmt.Fprintln(out, "KEEP prefers higher resolution, then a larger file at equal resolution.")
+	fmt.Fprintln(out, "KEEP prefers higher measured quality when two photos differ by more than 0.02,")
+	fmt.Fprintln(out, "then higher resolution, then the larger file, then the less-nested, shorter path.")
 	return nil
 }
 
@@ -1338,13 +1347,13 @@ func cmdJobs(ctx context.Context, c *client, out io.Writer, libraryID string) er
 	printJobTable(out, jr.ByType)
 
 	t := jr.Total
-	fmt.Fprintf(out, "\n%-22s  %6d  %6d  %6d  %6d  %6d\n",
+	fmt.Fprintf(out, "\n%-24s  %6d  %6d  %6d  %6d  %6d\n",
 		"TOTAL", t.Pending, t.Running, t.Succeeded, t.Dead, t.Total)
 	return nil
 }
 
 func printJobTable(out io.Writer, byType map[string]jobCounts) {
-	fmt.Fprintf(out, "%-22s  %6s  %6s  %6s  %6s  %6s\n",
+	fmt.Fprintf(out, "%-24s  %6s  %6s  %6s  %6s  %6s\n",
 		"JOB TYPE", "PEND", "RUN", "OK", "DEAD", "TOTAL")
 
 	// Stable order: Go map iteration is randomised, and a table that reshuffles
@@ -1357,12 +1366,19 @@ func printJobTable(out io.Writer, byType map[string]jobCounts) {
 
 	for _, name := range names {
 		c := byType[name]
-		fmt.Fprintf(out, "%-22s  %6d  %6d  %6d  %6d  %6d\n",
+		fmt.Fprintf(out, "%-24s  %6d  %6d  %6d  %6d  %6d\n",
 			name, c.Pending, c.Running, c.Succeeded, c.Dead, c.Total)
 	}
 }
 
-func cmdWorkers(ctx context.Context, c *client, out io.Writer) error {
+// cmdWorkers prints the worker fleet.
+//
+// By default only active workers are listed, with the rest summarised as a
+// count. Every worker process that has ever run keeps its row -- that history
+// is what lets `dead` be distinguished from `stopped` -- so after a few
+// rescales or benchmark runs a full listing is dozens of rows burying the few
+// that are actually running. -all shows everything.
+func cmdWorkers(ctx context.Context, c *client, out io.Writer, all bool) error {
 	var resp workersResponse
 	if _, err := c.get(ctx, "/api/workers", &resp); err != nil {
 		return err
@@ -1379,10 +1395,28 @@ func cmdWorkers(ctx context.Context, c *client, out io.Writer) error {
 
 	fmt.Fprintf(out, "%-10s  %-16s  %-7s  %5s  %5s  %s\n",
 		"STATUS", "HOSTNAME", "PID", "SLOTS", "JOBS", "LAST SEEN")
+	hidden := map[string]int{}
 	for _, w := range resp.Workers {
+		if !all && w.Status != "active" {
+			hidden[w.Status]++
+			continue
+		}
 		fmt.Fprintf(out, "%-10s  %-16s  %-7d  %5d  %5d  %s\n",
 			w.Status, truncate(w.Hostname, 16), w.PID, w.Concurrency, w.RunningJobs,
 			humanAgo(w.LastHeartbeatAt))
+	}
+
+	if len(hidden) > 0 {
+		statuses := make([]string, 0, len(hidden))
+		for s := range hidden {
+			statuses = append(statuses, s)
+		}
+		sort.Strings(statuses)
+		parts := make([]string, 0, len(statuses))
+		for _, s := range statuses {
+			parts = append(parts, fmt.Sprintf("%d %s", hidden[s], s))
+		}
+		fmt.Fprintf(out, "\nNot shown: %s from earlier runs. Use -all to list them.\n", strings.Join(parts, ", "))
 	}
 
 	fmt.Fprintln(out, "\nstopped = shut down cleanly and handed its work back")
@@ -1493,8 +1527,8 @@ func cmdDuplicates(ctx context.Context, c *client, out io.Writer, libraryID stri
 	// suggestions is about to delete their own photos by hand, and it should be
 	// unambiguous that this tool has not touched anything.
 	fmt.Fprintln(out, "These are suggestions. No files have been modified, moved or deleted.")
-	fmt.Fprintln(out, "KEEP marks the copy with the shortest, least-nested path -- for exact")
-	fmt.Fprintln(out, "duplicates every copy is byte-identical, so this picks a path, not a photo.")
+	fmt.Fprintln(out, "KEEP marks the least-nested copy, then the shortest name, then alphabetical.")
+	fmt.Fprintln(out, "Every copy is byte-identical, so this picks a path, not a photo.")
 	return nil
 }
 

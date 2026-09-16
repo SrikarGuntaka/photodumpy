@@ -100,12 +100,13 @@ type Group struct {
 // suggested keeper is exposed. On the fixture corpus, unrelated photos average
 // 30 bits apart, so a chain would need several improbable intermediate hops.
 //
-// COMPLEXITY: O(n^2) comparisons. Each is an XOR and a popcount -- two
-// instructions -- so 10,000 photos is 50M operations, on the order of a second.
+// COMPLEXITY: O(n^2) comparisons. Each is an XOR and a popcount, so 10,000
+// photos is 50M pairs. MEASURED (BenchmarkGroupSimilar, benchmarks/micro.txt):
+// 57-82 ms for all of them on a laptop Core Ultra 7 155H -- this comment once
+// guessed "on the order of a second", more than ten times too pessimistic.
 // The bucketing optimisation is designed in DESIGN_DECISIONS.md and
-// deliberately not built: it would be optimising a bottleneck nobody has
-// measured. BenchmarkGroupSimilar exists so the crossover point can be found
-// with data when it matters.
+// deliberately not built: the quadratic scan is well under a second at the
+// largest size measured, and nothing has shown it to be a bottleneck.
 func GroupSimilar(candidates []Candidate, threshold int) []Group {
 	if threshold < 0 {
 		threshold = 0

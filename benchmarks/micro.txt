@@ -1,0 +1,111 @@
+goos: windows
+goarch: amd64
+pkg: github.com/srikarguntaka/photo-organizer/internal/clustering
+cpu: Intel(R) Core(TM) Ultra 7 155H
+BenchmarkSegment/n=1000-22         	    2430	    477044 ns/op	  489845 B/op	    2839 allocs/op
+BenchmarkSegment/n=1000-22         	    2768	    472614 ns/op	  489843 B/op	    2839 allocs/op
+BenchmarkSegment/n=1000-22         	    2942	    815811 ns/op	  489849 B/op	    2839 allocs/op
+BenchmarkSegment/n=1000-22         	    1611	    792418 ns/op	  489849 B/op	    2839 allocs/op
+BenchmarkSegment/n=1000-22         	    2790	    608029 ns/op	  489839 B/op	    2839 allocs/op
+BenchmarkSegment/n=10000-22        	     142	   8355323 ns/op	 5010236 B/op	   24392 allocs/op
+BenchmarkSegment/n=10000-22        	     194	   7475992 ns/op	 5010262 B/op	   24392 allocs/op
+BenchmarkSegment/n=10000-22        	     142	   8981794 ns/op	 5010231 B/op	   24392 allocs/op
+BenchmarkSegment/n=10000-22        	     127	   8897582 ns/op	 5010234 B/op	   24392 allocs/op
+BenchmarkSegment/n=10000-22        	     100	  15895429 ns/op	 5010324 B/op	   24392 allocs/op
+BenchmarkSegment/n=100000-22       	      10	 138366710 ns/op	59301363 B/op	  242098 allocs/op
+BenchmarkSegment/n=100000-22       	       8	 153738775 ns/op	59301354 B/op	  242098 allocs/op
+BenchmarkSegment/n=100000-22       	      12	 131232975 ns/op	59301398 B/op	  242098 allocs/op
+BenchmarkSegment/n=100000-22       	      12	 146577458 ns/op	59301380 B/op	  242098 allocs/op
+BenchmarkSegment/n=100000-22       	      14	  89697771 ns/op	59301360 B/op	  242098 allocs/op
+BenchmarkHaversine-22              	20918899	        66.01 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHaversine-22              	21038300	        56.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHaversine-22              	20719125	        53.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHaversine-22              	20575425	        59.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHaversine-22              	24033984	        58.01 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/srikarguntaka/photo-organizer/internal/clustering	37.927s
+goos: windows
+goarch: amd64
+pkg: github.com/srikarguntaka/photo-organizer/internal/duplicates
+cpu: Intel(R) Core(TM) Ultra 7 155H
+BenchmarkGroupSimilar/n=100-22         	   63896	     17389 ns/op	   17792 B/op	     113 allocs/op
+BenchmarkGroupSimilar/n=100-22         	   65170	     19351 ns/op	   17792 B/op	     113 allocs/op
+BenchmarkGroupSimilar/n=100-22         	   60858	     21966 ns/op	   17792 B/op	     113 allocs/op
+BenchmarkGroupSimilar/n=100-22         	   47701	     22768 ns/op	   17793 B/op	     113 allocs/op
+BenchmarkGroupSimilar/n=100-22         	   54758	     21801 ns/op	   17793 B/op	     113 allocs/op
+BenchmarkGroupSimilar/n=1000-22        	    2234	    639457 ns/op	  241751 B/op	    1024 allocs/op
+BenchmarkGroupSimilar/n=1000-22        	    1624	    705200 ns/op	  241748 B/op	    1024 allocs/op
+BenchmarkGroupSimilar/n=1000-22        	    1524	    896135 ns/op	  241751 B/op	    1024 allocs/op
+BenchmarkGroupSimilar/n=1000-22        	    1360	   1556339 ns/op	  241754 B/op	    1024 allocs/op
+BenchmarkGroupSimilar/n=1000-22        	    1707	    807278 ns/op	  241749 B/op	    1024 allocs/op
+BenchmarkGroupSimilar/n=5000-22        	      72	  16898164 ns/op	 1060686 B/op	    5050 allocs/op
+BenchmarkGroupSimilar/n=5000-22        	      85	  13667062 ns/op	 1060803 B/op	    5051 allocs/op
+BenchmarkGroupSimilar/n=5000-22        	      87	  12231840 ns/op	 1060699 B/op	    5050 allocs/op
+BenchmarkGroupSimilar/n=5000-22        	      84	  12891925 ns/op	 1060715 B/op	    5050 allocs/op
+BenchmarkGroupSimilar/n=5000-22        	      85	  22990411 ns/op	 1060762 B/op	    5050 allocs/op
+BenchmarkGroupSimilar/n=10000-22       	      22	  82189100 ns/op	 2117772 B/op	   10091 allocs/op
+BenchmarkGroupSimilar/n=10000-22       	      30	  73580593 ns/op	 2117758 B/op	   10091 allocs/op
+BenchmarkGroupSimilar/n=10000-22       	      28	  56705589 ns/op	 2117480 B/op	   10089 allocs/op
+BenchmarkGroupSimilar/n=10000-22       	      31	  77940390 ns/op	 2117889 B/op	   10092 allocs/op
+BenchmarkGroupSimilar/n=10000-22       	      27	  58756330 ns/op	 2117821 B/op	   10092 allocs/op
+PASS
+ok  	github.com/srikarguntaka/photo-organizer/internal/duplicates	33.030s
+goos: windows
+goarch: amd64
+pkg: github.com/srikarguntaka/photo-organizer/internal/hashing
+cpu: Intel(R) Core(TM) Ultra 7 155H
+BenchmarkDHashReader12MP-22    	      12	 110277758 ns/op	18311616 B/op	      12 allocs/op
+BenchmarkDHashReader12MP-22    	       9	 198447456 ns/op	18311187 B/op	      11 allocs/op
+BenchmarkDHashReader12MP-22    	      10	 158249140 ns/op	18311184 B/op	      11 allocs/op
+BenchmarkDHashReader12MP-22    	       6	 195071067 ns/op	18311186 B/op	      11 allocs/op
+BenchmarkDHashReader12MP-22    	      10	 188468450 ns/op	18311240 B/op	      11 allocs/op
+BenchmarkSum1MB-22             	    1434	    923446 ns/op	1135.50 MB/s	   65744 B/op	       4 allocs/op
+BenchmarkSum1MB-22             	    1588	    924302 ns/op	1134.45 MB/s	   65744 B/op	       4 allocs/op
+BenchmarkSum1MB-22             	    1351	    877995 ns/op	1194.28 MB/s	   65744 B/op	       4 allocs/op
+BenchmarkSum1MB-22             	    1688	    868064 ns/op	1207.94 MB/s	   65744 B/op	       4 allocs/op
+BenchmarkSum1MB-22             	    1646	    841906 ns/op	1245.47 MB/s	   65744 B/op	       4 allocs/op
+PASS
+ok  	github.com/srikarguntaka/photo-organizer/internal/hashing	17.441s
+goos: windows
+goarch: amd64
+pkg: github.com/srikarguntaka/photo-organizer/internal/metadata
+cpu: Intel(R) Core(TM) Ultra 7 155H
+BenchmarkExtract12MP-22    	   51805	     29954 ns/op	   37624 B/op	     171 allocs/op
+BenchmarkExtract12MP-22    	   43988	     28025 ns/op	   37628 B/op	     171 allocs/op
+BenchmarkExtract12MP-22    	   49456	     34403 ns/op	   37629 B/op	     171 allocs/op
+BenchmarkExtract12MP-22    	   61884	     33797 ns/op	   37626 B/op	     171 allocs/op
+BenchmarkExtract12MP-22    	   34381	     29777 ns/op	   37625 B/op	     171 allocs/op
+PASS
+ok  	github.com/srikarguntaka/photo-organizer/internal/metadata	10.428s
+goos: windows
+goarch: amd64
+pkg: github.com/srikarguntaka/photo-organizer/internal/quality
+cpu: Intel(R) Core(TM) Ultra 7 155H
+BenchmarkAnalyze-22    	       3	 401186700 ns/op	56718917 B/op	      14 allocs/op
+BenchmarkAnalyze-22    	       3	 463500000 ns/op	56719061 B/op	      15 allocs/op
+BenchmarkAnalyze-22    	       3	 391177700 ns/op	56718912 B/op	      14 allocs/op
+BenchmarkAnalyze-22    	       4	 426162350 ns/op	56718912 B/op	      14 allocs/op
+BenchmarkAnalyze-22    	       3	 383611767 ns/op	56718912 B/op	      14 allocs/op
+PASS
+ok  	github.com/srikarguntaka/photo-organizer/internal/quality	27.762s
+goos: windows
+goarch: amd64
+pkg: github.com/srikarguntaka/photo-organizer/internal/thumbnail
+cpu: Intel(R) Core(TM) Ultra 7 155H
+BenchmarkFromReader12MP-22     	       2	 525267150 ns/op	106807520 B/op	     193 allocs/op
+BenchmarkFromReader12MP-22     	       2	 517935900 ns/op	106810084 B/op	     194 allocs/op
+BenchmarkFromReader12MP-22     	       2	 614024150 ns/op	106807472 B/op	     191 allocs/op
+BenchmarkFromReader12MP-22     	       2	 554643700 ns/op	106807480 B/op	     191 allocs/op
+BenchmarkFromReader12MP-22     	       2	 526095750 ns/op	106807480 B/op	     191 allocs/op
+BenchmarkRender12MP-22         	       2	 599826350 ns/op	88459080 B/op	      12 allocs/op
+BenchmarkRender12MP-22         	       3	 520764167 ns/op	88459066 B/op	      12 allocs/op
+BenchmarkRender12MP-22         	       3	 495873533 ns/op	88459264 B/op	      14 allocs/op
+BenchmarkRender12MP-22         	       3	 393424300 ns/op	88459072 B/op	      12 allocs/op
+BenchmarkRender12MP-22         	       3	 396784533 ns/op	88459072 B/op	      12 allocs/op
+BenchmarkEncodeThumbnail-22    	     805	   2220954 ns/op	    4547 B/op	       7 allocs/op
+BenchmarkEncodeThumbnail-22    	     584	   1911307 ns/op	    4548 B/op	       7 allocs/op
+BenchmarkEncodeThumbnail-22    	     740	   1741731 ns/op	    4547 B/op	       7 allocs/op
+BenchmarkEncodeThumbnail-22    	     645	   1976272 ns/op	    4548 B/op	       7 allocs/op
+BenchmarkEncodeThumbnail-22    	     676	   1707428 ns/op	    4547 B/op	       7 allocs/op
+PASS
+ok  	github.com/srikarguntaka/photo-organizer/internal/thumbnail	38.543s
